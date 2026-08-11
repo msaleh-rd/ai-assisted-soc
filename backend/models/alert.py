@@ -1,6 +1,6 @@
 """Alert data models for the AI-Native SOC Platform."""
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional, Any
@@ -78,18 +78,15 @@ class NormalizedAlert:
     
     # Status and metadata - default fields
     status: AlertStatus = AlertStatus.NORMALIZED
-    alert_metadata: Dict[str, Any] = None
+    alert_metadata: Dict[str, Any] = field(default_factory=dict)
     
     # Deduplication tracking
     occurrence_count: int = 1
     last_occurrence: Optional[str] = None
-    deduplicated_alert_ids: List[str] = None
+    deduplicated_alert_ids: List[str] = field(default_factory=list)
     
     def __post_init__(self):
-        if self.alert_metadata is None:
-            self.alert_metadata = {}
-        if self.deduplicated_alert_ids is None:
-            self.deduplicated_alert_ids = []
+        pass  # Initialization already handled via field defaults
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
