@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI-Native SOC Platform</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <!-- Sidebar -->
+    <nav class="sidebar">
+        <div class="sidebar-header">
+            <div class="logo">
+                <span class="logo-icon">&#9737;</span>
+                <span>SOC Platform</span>
+            </div>
+            <span class="version">v0.3.0</span>
+        </div>
+        <ul class="nav-items">
+            <li class="nav-item active" data-page="dashboard">
+                <span class="nav-icon">&#9632;</span> Dashboard
+            </li>
+            <li class="nav-section">Phase 1 &mdash; Intake</li>
+            <li class="nav-item" data-page="alerts">
+                <span class="nav-icon">&#9888;</span> Alert Ingestion
+            </li>
+            <li class="nav-item" data-page="evidence">
+                <span class="nav-icon">&#128269;</span> Evidence Collection
+            </li>
+            <li class="nav-section">Phase 2 &mdash; Correlation</li>
+            <li class="nav-item" data-page="compression">
+                <span class="nav-icon">&#9881;</span> Compression Pipeline
+            </li>
+            <li class="nav-item" data-page="investigation">
+                <span class="nav-icon">&#128209;</span> Investigation Packages
+            </li>
+            <li class="nav-section">Phase 3 &mdash; Response</li>
+            <li class="nav-item" data-page="rca">
+                <span class="nav-icon">&#128270;</span> Root Cause Analysis
+            </li>
+            <li class="nav-item" data-page="response">
+                <span class="nav-icon">&#9889;</span> Response Orchestration
+            </li>
+            <li class="nav-item" data-page="incidents">
+                <span class="nav-icon">&#128196;</span> Incidents &amp; Reports
+            </li>
+            <li class="nav-section">System</li>
+            <li class="nav-item" data-page="demo">
+                <span class="nav-icon">&#9654;</span> End-to-End Demo
+            </li>
+        </ul>
+        <div class="sidebar-footer">
+            <div class="health-indicators" id="healthIndicators">
+                <span class="health-dot" id="healthApi" title="API"></span> API
+                <span class="health-dot" id="healthDb" title="DB"></span> DB
+                <span class="health-dot" id="healthGraph" title="Neo4j"></span> Graph
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="content">
+        <!-- Dashboard -->
+        <div class="page active" id="page-dashboard">
+            <div class="page-header">
+                <h1>SOC Dashboard</h1>
+                <button class="btn btn-sm" onclick="refreshDashboard()">Refresh</button>
+            </div>
+            <div class="stats-grid" id="dashboardStats">
+                <div class="stat-card">
+                    <div class="stat-label">Platform Status</div>
+                    <div class="stat-value" id="statPlatformStatus">--</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Tracked Alerts</div>
+                    <div class="stat-value" id="statTrackedAlerts">--</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Pending Evidence</div>
+                    <div class="stat-value" id="statPendingEvidence">--</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Investigations</div>
+                    <div class="stat-value" id="statInvestigations">--</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Avg Compression</div>
+                    <div class="stat-value" id="statCompression">--</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Patterns Detected</div>
+                    <div class="stat-value" id="statPatterns">--</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">RCA Results</div>
+                    <div class="stat-value" id="statRCA">--</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Active Incidents</div>
+                    <div class="stat-value" id="statIncidents">--</div>
+                </div>
+            </div>
+            <div class="panel">
+                <h3>Service Health</h3>
+                <div id="healthDetails" class="health-grid"></div>
+            </div>
+        </div>
+
+        <!-- Alert Ingestion -->
+        <div class="page" id="page-alerts">
+            <div class="page-header">
+                <h1>Alert Ingestion</h1>
+                <span class="badge">Phase 1</span>
+            </div>
+            <div class="grid-2">
+                <div class="panel">
+                    <h3>Ingest Alert</h3>
+                    <div class="form-group">
+                        <label>Source</label>
+                        <select id="alertSource">
+                            <option value="crowdstrike">CrowdStrike</option>
+                            <option value="splunk">Splunk</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Alert Template</label>
+                        <select id="alertTemplate" onchange="loadAlertTemplate()">
+                            <option value="crowdstrike_malware">CrowdStrike - Malware Detection</option>
+                            <option value="crowdstrike_lateral">CrowdStrike - Lateral Movement</option>
+                            <option value="splunk_bruteforce">Splunk - Brute Force</option>
+                            <option value="splunk_exfiltration">Splunk - Data Exfiltration</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Raw Alert JSON</label>
+                        <textarea id="alertPayload" rows="12" class="code-input"></textarea>
+                    </div>
+                    <button class="btn btn-primary" onclick="ingestAlert()">Ingest Alert</button>
+                    <button class="btn btn-secondary" onclick="ingestBatchAlerts()">Ingest Batch (All Templates)</button>
+                    <div id="alertResult" class="result-box"></div>
+                </div>
+                <div class="panel">
+                    <h3>Alert Status</h3>
+                    <div class="btn-group">
+                        <button class="btn btn-sm" onclick="getAlertStats()">Get Stats</button>
+                        <button class="btn btn-sm" onclick="getPendingAlerts()">Pending Alerts</button>
+                        <button class="btn btn-sm btn-danger" onclick="cleanupAlerts()">Cleanup</button>
+                    </div>
+                    <div id="alertStatsResult" class="result-box"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Evidence Collection -->
+        <div class="page" id="page-evidence">
+            <div class="page-header">
+                <h1>Evidence Collection</h1>
+                <span class="badge">Phase 1</span>
+            </div>
+            <div class="grid-2">
+                <div class="panel">
+                    <h3>Collect Evidence</h3>
+                    <div class="form-group">
+                        <label>Investigation ID</label>
+                        <input type="text" id="evidenceInvId" placeholder="e.g. inv-abc123">
+                    </div>
+                    <div class="form-group">
+                        <label>Max Depth (1-5)</label>
+                        <input type="number" id="evidenceDepth" value="2" min="1" max="5">
+                    </div>
+                    <button class="btn btn-primary" onclick="collectEvidence()">Collect Evidence</button>
+                    <div id="evidenceResult" class="result-box"></div>
+                </div>
+                <div class="panel">
+                    <h3>Evidence Stats</h3>
+                    <button class="btn btn-sm" onclick="getEvidenceStats()">Get Stats</button>
+                    <div id="evidenceStatsResult" class="result-box"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Compression Pipeline -->
+        <div class="page" id="page-compression">
+            <div class="page-header">
+                <h1>7-Stage Compression Pipeline</h1>
+                <span class="badge badge-blue">Phase 2</span>
+            </div>
+            <div class="pipeline-stages">
+                <div class="stage">1. Temporal Filter<br><small>80-90%</small></div>
+                <div class="stage-arrow">&rarr;</div>
+                <div class="stage">2. Entity Correlator<br><small>50-70%</small></div>
+                <div class="stage-arrow">&rarr;</div>
+                <div class="stage">3. Behavioral Filter<br><small>60-80%</small></div>
+                <div class="stage-arrow">&rarr;</div>
+                <div class="stage">4. Deduplicator<br><small>30-40%</small></div>
+                <div class="stage-arrow">&rarr;</div>
+                <div class="stage">5. Graph Analyzer<br><small>40-60%</small></div>
+                <div class="stage-arrow">&rarr;</div>
+                <div class="stage">6. Abstraction<br><small>20-40%</small></div>
+                <div class="stage-arrow">&rarr;</div>
+                <div class="stage">7. Risk Scorer<br><small>40-60%</small></div>
+            </div>
+            <div class="grid-2">
+                <div class="panel">
+                    <h3>Compress Events</h3>
+                    <div class="form-group">
+                        <label>Investigation ID</label>
+                        <input type="text" id="compressInvId" value="inv-demo-001">
+                    </div>
+                    <div class="form-group">
+                        <label>Alert ID</label>
+                        <input type="text" id="compressAlertId" value="alert-demo-001">
+                    </div>
+                    <div class="form-group">
+                        <label>Events JSON (array of event objects)</label>
+                        <textarea id="compressEvents" rows="10" class="code-input"></textarea>
+                    </div>
+                    <button class="btn btn-primary" onclick="compressEvents()">Run Compression</button>
+                    <button class="btn btn-secondary" onclick="loadSampleEvents()">Load Sample Events</button>
+                    <div id="compressResult" class="result-box"></div>
+                </div>
+                <div class="panel">
+                    <h3>Compression Stats</h3>
+                    <button class="btn btn-sm" onclick="getCompressionStats()">Get Stats</button>
+                    <div id="compressionStatsResult" class="result-box"></div>
+                    <h3 style="margin-top:1.5rem">Retrieve Compressed Package</h3>
+                    <div class="form-group">
+                        <label>Investigation ID</label>
+                        <input type="text" id="retrieveCompressedId" placeholder="inv-demo-001">
+                    </div>
+                    <button class="btn btn-sm" onclick="getCompressedPackage()">Retrieve</button>
+                    <div id="compressedPackageResult" class="result-box"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Investigation Packages -->
+        <div class="page" id="page-investigation">
+            <div class="page-header">
+                <h1>Investigation Packages</h1>
+                <span class="badge badge-blue">Phase 2</span>
+            </div>
+            <div class="grid-2">
+                <div class="panel">
+                    <h3>Build Investigation Package</h3>
+                    <div class="form-group">
+                        <label>Investigation ID</label>
+                        <input type="text" id="invPkgInvId" placeholder="inv-demo-001">
+                    </div>
+                    <div class="form-group">
+                        <label>Compressed Package ID</label>
+                        <input type="text" id="invPkgCompId" placeholder="From compression step">
+                    </div>
+                    <div class="form-group">
+                        <label>Package Type</label>
+                        <select id="invPkgType">
+                            <option value="detailed_rca">Detailed RCA</option>
+                            <option value="rapid_containment">Rapid Containment</option>
+                            <option value="forensic_analysis">Forensic Analysis</option>
+                            <option value="executive_summary">Executive Summary</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-primary" onclick="buildInvestigationPackage()">Build Package</button>
+                    <div id="invPkgResult" class="result-box"></div>
+                </div>
+                <div class="panel">
+                    <h3>Retrieve Package</h3>
+                    <div class="form-group">
+                        <label>Package ID</label>
+                        <input type="text" id="retrievePkgId" placeholder="pkg-...">
+                    </div>
+                    <button class="btn btn-sm" onclick="getInvestigationPackage()">Retrieve</button>
+                    <div id="invPkgDetailResult" class="result-box"></div>
+
+                    <h3 style="margin-top:1.5rem">Timeline</h3>
+                    <div class="form-group">
+                        <label>Investigation ID</label>
+                        <input type="text" id="timelineInvId" placeholder="inv-demo-001">
+                    </div>
+                    <button class="btn btn-sm" onclick="getTimeline()">View Timeline</button>
+                    <div id="timelineResult" class="result-box"></div>
+
+                    <h3 style="margin-top:1.5rem">Attack Graph</h3>
+                    <div class="form-group">
+                        <label>Investigation ID</label>
+                        <input type="text" id="graphInvId" placeholder="inv-demo-001">
+                    </div>
+                    <button class="btn btn-sm" onclick="getAttackGraph()">View Graph</button>
+                    <div id="graphResult" class="result-box"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Root Cause Analysis -->
+        <div class="page" id="page-rca">
+            <div class="page-header">
+                <h1>Root Cause Analysis</h1>
+                <span class="badge badge-red">Phase 3</span>
+            </div>
+            <div class="grid-2">
+                <div class="panel">
+                    <h3>Analyze Investigation</h3>
+                    <div class="form-group">
+                        <label>Investigation ID</label>
+                        <input type="text" id="rcaInvId" placeholder="inv-demo-001">
+                    </div>
+                    <div class="form-group">
+                        <label>Package ID</label>
+                        <input type="text" id="rcaPkgId" placeholder="pkg-...">
+                    </div>
+                    <button class="btn btn-primary" onclick="analyzeRCA()">Run RCA</button>
+                    <div id="rcaResult" class="result-box"></div>
+                </div>
+                <div class="panel">
+                    <h3>RCA Result Details</h3>
+                    <div class="form-group">
+                        <label>RCA ID</label>
+                        <input type="text" id="rcaDetailId" placeholder="rca-...">
+                    </div>
+                    <button class="btn btn-sm" onclick="getRCADetail()">Retrieve</button>
+                    <div id="rcaDetailResult" class="result-box"></div>
+
+                    <h3 style="margin-top:1.5rem">Adaptive Investigation Loop</h3>
+                    <div class="form-group">
+                        <label>Investigation ID</label>
+                        <input type="text" id="adaptiveInvId" placeholder="inv-demo-001">
+                    </div>
+                    <div class="form-group">
+                        <label>RCA ID</label>
+                        <input type="text" id="adaptiveRcaId" placeholder="rca-...">
+                    </div>
+                    <div class="form-group">
+                        <label>Confidence Threshold</label>
+                        <input type="number" id="adaptiveThreshold" value="0.7" step="0.05" min="0.1" max="1.0">
+                    </div>
+                    <button class="btn btn-secondary" onclick="runAdaptiveLoop()">Run Adaptive Loop</button>
+                    <div id="adaptiveResult" class="result-box"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Response Orchestration -->
+        <div class="page" id="page-response">
+            <div class="page-header">
+                <h1>Response Orchestration</h1>
+                <span class="badge badge-red">Phase 3</span>
+            </div>
+            <div class="panel">
+                <h3>Execute Response Plan</h3>
+                <div class="grid-3-inline">
+                    <div class="form-group">
+                        <label>Investigation ID</label>
+                        <input type="text" id="responseInvId" placeholder="inv-demo-001">
+                    </div>
+                    <div class="form-group">
+                        <label>RCA ID</label>
+                        <input type="text" id="responseRcaId" placeholder="rca-...">
+                    </div>
+                    <div class="form-group">
+                        <label>Auto Approve</label>
+                        <select id="responseAutoApprove">
+                            <option value="true">Yes</option>
+                            <option value="false">No</option>
+                        </select>
+                    </div>
+                </div>
+                <button class="btn btn-primary btn-wide" onclick="executeResponse()">Execute Response Plan</button>
+                <div id="responseResult" class="result-box"></div>
+            </div>
+            <div class="panel" style="margin-top:1rem">
+                <h3>Response Action Types</h3>
+                <div class="action-grid">
+                    <div class="action-card critical">
+                        <div class="action-icon">&#128683;</div>
+                        <div class="action-name">Isolate Host</div>
+                        <div class="action-time">~5 min</div>
+                    </div>
+                    <div class="action-card critical">
+                        <div class="action-icon">&#128273;</div>
+                        <div class="action-name">Reset Credentials</div>
+                        <div class="action-time">~15 min</div>
+                    </div>
+                    <div class="action-card high">
+                        <div class="action-icon">&#128683;</div>
+                        <div class="action-name">Block IP</div>
+                        <div class="action-time">~2 min</div>
+                    </div>
+                    <div class="action-card high">
+                        <div class="action-icon">&#127760;</div>
+                        <div class="action-name">Block Domain</div>
+                        <div class="action-time">~2 min</div>
+                    </div>
+                    <div class="action-card high">
+                        <div class="action-icon">&#9940;</div>
+                        <div class="action-name">Kill Process</div>
+                        <div class="action-time">~3 min</div>
+                    </div>
+                    <div class="action-card medium">
+                        <div class="action-icon">&#128274;</div>
+                        <div class="action-name">Enable MFA</div>
+                        <div class="action-time">~30 min</div>
+                    </div>
+                    <div class="action-card medium">
+                        <div class="action-icon">&#128736;</div>
+                        <div class="action-name">Patch System</div>
+                        <div class="action-time">~120 min</div>
+                    </div>
+                    <div class="action-card medium">
+                        <div class="action-icon">&#128293;</div>
+                        <div class="action-name">Update Firewall</div>
+                        <div class="action-time">~5 min</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Incidents & Reports -->
+        <div class="page" id="page-incidents">
+            <div class="page-header">
+                <h1>Incidents &amp; Reports</h1>
+                <span class="badge badge-red">Phase 3</span>
+            </div>
+            <div class="grid-2">
+                <div class="panel">
+                    <h3>Incidents</h3>
+                    <div class="btn-group">
+                        <button class="btn btn-sm" onclick="listIncidents()">List All</button>
+                        <button class="btn btn-sm" onclick="listIncidents('open')">Open</button>
+                        <button class="btn btn-sm" onclick="listIncidents('closed')">Closed</button>
+                    </div>
+                    <div id="incidentListResult" class="result-box"></div>
+
+                    <h3 style="margin-top:1.5rem">Incident Detail</h3>
+                    <div class="form-group">
+                        <label>Incident ID</label>
+                        <input type="text" id="incidentDetailId" placeholder="INC-...">
+                    </div>
+                    <button class="btn btn-sm" onclick="getIncidentDetail()">View</button>
+                    <div id="incidentDetailResult" class="result-box"></div>
+
+                    <h3 style="margin-top:1.5rem">Close Incident</h3>
+                    <div class="form-group">
+                        <label>Incident ID</label>
+                        <input type="text" id="closeIncidentId" placeholder="INC-...">
+                    </div>
+                    <div class="form-group">
+                        <label>Closure Notes</label>
+                        <textarea id="closureNotes" rows="3">Incident resolved. Root cause remediated. All systems restored.</textarea>
+                    </div>
+                    <button class="btn btn-sm btn-danger" onclick="closeIncident()">Close Incident</button>
+                    <div id="closeIncidentResult" class="result-box"></div>
+                </div>
+                <div class="panel">
+                    <h3>Generate Reports</h3>
+                    <div class="form-group">
+                        <label>Incident ID</label>
+                        <input type="text" id="reportIncidentId" placeholder="INC-...">
+                    </div>
+                    <div class="form-group">
+                        <label>Report Types</label>
+                        <div class="checkbox-group">
+                            <label><input type="checkbox" value="executive_summary" checked> Executive Summary</label>
+                            <label><input type="checkbox" value="technical_analysis" checked> Technical Analysis</label>
+                            <label><input type="checkbox" value="forensic_report"> Forensic Report</label>
+                            <label><input type="checkbox" value="compliance_report"> Compliance Report</label>
+                            <label><input type="checkbox" value="incident_log"> Incident Log</label>
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" onclick="generateReports()">Generate Reports</button>
+                    <div id="reportGenResult" class="result-box"></div>
+
+                    <h3 style="margin-top:1.5rem">View Report</h3>
+                    <div class="form-group">
+                        <label>Report ID</label>
+                        <input type="text" id="viewReportId" placeholder="RPT-...">
+                    </div>
+                    <div class="form-group">
+                        <label>Format</label>
+                        <select id="reportFormat">
+                            <option value="text">Text</option>
+                            <option value="json">JSON</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-sm" onclick="viewReport()">View Report</button>
+                    <div id="viewReportResult" class="result-box"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- End-to-End Demo -->
+        <div class="page" id="page-demo">
+            <div class="page-header">
+                <h1>End-to-End Demo</h1>
+                <span class="badge badge-green">Full Pipeline</span>
+            </div>
+            <div class="panel">
+                <p class="description">Run the complete SOC pipeline: alert ingestion &rarr; evidence collection &rarr; event compression &rarr; investigation package &rarr; root cause analysis &rarr; response execution &rarr; report generation.</p>
+
+                <div class="demo-controls">
+                    <button class="btn btn-primary btn-wide" onclick="runFullDemo()" id="demoStartBtn">
+                        &#9654; Run Full Pipeline Demo
+                    </button>
+                </div>
+
+                <div class="demo-timeline" id="demoTimeline">
+                    <div class="demo-step" id="demoStep1">
+                        <div class="step-number">1</div>
+                        <div class="step-content">
+                            <div class="step-title">Alert Ingestion</div>
+                            <div class="step-desc">Ingest CrowdStrike malware detection alert</div>
+                            <div class="step-result" id="demoResult1"></div>
+                        </div>
+                    </div>
+                    <div class="demo-step" id="demoStep2">
+                        <div class="step-number">2</div>
+                        <div class="step-content">
+                            <div class="step-title">Evidence Collection</div>
+                            <div class="step-desc">Collect entity evidence and enrichments</div>
+                            <div class="step-result" id="demoResult2"></div>
+                        </div>
+                    </div>
+                    <div class="demo-step" id="demoStep3">
+                        <div class="step-number">3</div>
+                        <div class="step-content">
+                            <div class="step-title">Event Compression</div>
+                            <div class="step-desc">Run 7-stage compression pipeline (1,000-10,000x reduction)</div>
+                            <div class="step-result" id="demoResult3"></div>
+                        </div>
+                    </div>
+                    <div class="demo-step" id="demoStep4">
+                        <div class="step-number">4</div>
+                        <div class="step-content">
+                            <div class="step-title">Investigation Package</div>
+                            <div class="step-desc">Build curated investigation package</div>
+                            <div class="step-result" id="demoResult4"></div>
+                        </div>
+                    </div>
+                    <div class="demo-step" id="demoStep5">
+                        <div class="step-number">5</div>
+                        <div class="step-content">
+                            <div class="step-title">Root Cause Analysis</div>
+                            <div class="step-desc">Identify root cause using sx-truerca engine</div>
+                            <div class="step-result" id="demoResult5"></div>
+                        </div>
+                    </div>
+                    <div class="demo-step" id="demoStep6">
+                        <div class="step-number">6</div>
+                        <div class="step-content">
+                            <div class="step-title">Response Execution</div>
+                            <div class="step-desc">Execute containment and remediation actions</div>
+                            <div class="step-result" id="demoResult6"></div>
+                        </div>
+                    </div>
+                    <div class="demo-step" id="demoStep7">
+                        <div class="step-number">7</div>
+                        <div class="step-content">
+                            <div class="step-title">Report Generation</div>
+                            <div class="step-desc">Generate executive and technical reports</div>
+                            <div class="step-result" id="demoResult7"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

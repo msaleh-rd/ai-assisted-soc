@@ -3,7 +3,7 @@
 from fastapi import APIRouter
 
 # Import route modules
-from backend.api.routes import alerts, investigations, correlation
+from backend.api.routes import alerts, investigations, correlation, rca
 
 router = APIRouter()
 
@@ -11,3 +11,4 @@ router = APIRouter()
 router.include_router(alerts.router)
 router.include_router(investigations.router)
 router.include_router(correlation.router)
+router.include_router(rca.router)

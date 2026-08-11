@@ -2,17 +2,19 @@
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from datetime import datetime
+import os
 
 from backend.api import router as api_router
 
 
 # Create FastAPI app
 app = FastAPI(
-    title="AI-Native SOC Platform - Phase 1-2",
-    description="Alert Intake, Evidence Collection & Correlation/Compression Service",
-    version="0.2.0",
+    title="AI-Native SOC Platform - Phase 1-3",
+    description="Alert Intake, Evidence Collection, Correlation/Compression, RCA & Response Orchestration",
+    version="0.3.0",
 )
 
 # Add CORS middleware
@@ -27,15 +29,31 @@ app.add_middleware(
 # Include API routes
 app.include_router(api_router)
 
+# Serve frontend static files
+frontend_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'frontend')
+if os.path.isdir(frontend_dir):
+    app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
+
+
+@app.get("/ui")
+async def serve_ui():
+    """Serve the SOC Dashboard UI."""
+    index_path = os.path.join(frontend_dir, 'index.html')
+    if os.path.isfile(index_path):
+        return FileResponse(index_path)
+    return JSONResponse({"error": "Frontend not found"}, status_code=404)
+
 
 @app.get("/")
 async def root():
     """Root endpoint with service info."""
     return {
         "name": "AI-Native SOC Platform",
-        "phases": "Phase 1 (Alert Intake & Evidence Collection) + Phase 2 (Correlation & Compression)",
-        "version": "0.2.0",
+        "phases": "Phase 1-3 (Alert Intake, Correlation, RCA & Response)",
+        "version": "0.3.0",
         "status": "running",
+        "ui": "/ui",
+        "docs": "/docs",
         "timestamp": datetime.utcnow().isoformat() + 'Z'
     }
 
