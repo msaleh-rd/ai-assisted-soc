@@ -11,6 +11,10 @@ from enum import Enum
 import asyncio
 import json
 
+import networkx as nx
+from backend.services.sx_truerca.causal_analyzer import CausalAnalyzer
+from backend.services.sx_truerca.rca_config import RCAConfig
+
 
 class ConfidenceLevel(Enum):
     """Confidence levels for RCA findings."""
@@ -121,17 +125,8 @@ class RCAEngineIntegration:
         """
         self.topology_path = topology_path
         self.topology = None
-        
-        # Import the actual orchestrator from sx-truerca if available
-        try:
-            from backend.src.orchestrator import InvestigationOrchestrator
-            from backend.src.rca_config import RCAConfig
-            self.orchestrator = InvestigationOrchestrator(enhanced_mode=True)
-            self.rca_config = RCAConfig()
-        except ImportError:
-            print("⚠️  sx-truerca RCA engine not available - using stub")
-            self.orchestrator = None
-            self.rca_config = None
+        self.rca_config = RCAConfig()
+        print("✅ sx-truerca CausalAnalyzer loaded successfully")
     
     async def analyze_investigation(self,
                                    investigation_package: Any) -> RCAResult:
@@ -198,30 +193,30 @@ class RCAEngineIntegration:
                           anomalies: List[Dict],
                           anomaly_scores: Dict[str, float],
                           investigation_package: Any) -> RootCauseAnalysis:
-        """Perform root cause analysis using sx-truerca engine."""
+        """Perform root cause analysis using sx-truerca CausalAnalyzer."""
         
-        # If orchestrator available, use it
-        if self.orchestrator and hasattr(self.orchestrator, 'score_root_causes'):
-            root_causes = self.orchestrator.score_root_causes(
-                target_service=target_service,
-                anomaly_scores=anomaly_scores,
-                anomalies=anomalies
-            )
-            
-            if root_causes:
-                top_cause = root_causes[0]
-                root_service = top_cause[0]
-                confidence = top_cause[1]
-                reason = top_cause[2]
-            else:
-                root_service = target_service
-                confidence = 0.5
-                reason = "Unable to identify external root cause"
+        # Build NetworkX DiGraph from investigation package
+        topology_graph = self._build_topology_graph(investigation_package)
+        
+        # Create CausalAnalyzer and run
+        analyzer = CausalAnalyzer(topology_graph, self.rca_config)
+        root_causes = analyzer.score_root_causes(
+            target_service=target_service,
+            anomaly_scores=anomaly_scores,
+            anomalies=anomalies
+        )
+        
+        if root_causes:
+            top_cause = root_causes[0]
+            root_service = top_cause[0]
+            # Normalize confidence to 0-1 range
+            max_score = root_causes[0][1]
+            confidence = min(max_score / (max_score + 1.0), 0.99) if max_score > 0 else 0.5
+            reason = top_cause[2]
         else:
-            # Fallback: use correlation patterns from investigation package
-            root_service = self._identify_root_cause_fallback(investigation_package)
-            confidence = investigation_package.overall_confidence
-            reason = "Identified from correlation patterns"
+            root_service = target_service
+            confidence = 0.5
+            reason = "Unable to identify external root cause"
         
         return RootCauseAnalysis(
             investigation_id=investigation_package.investigation_id,
@@ -239,6 +234,42 @@ class RCAEngineIntegration:
             estimated_blast_radius=len(investigation_package.impacted_assets)
         )
     
+    def _build_topology_graph(self, package: Any) -> nx.DiGraph:
+        """Build a NetworkX DiGraph from investigation package entity graph and relationships."""
+        
+        graph = nx.DiGraph()
+        
+        # Add all entities as nodes and edges from entity_graph
+        entity_graph = package.entity_graph
+        if isinstance(entity_graph, dict):
+            for entity_id, node in entity_graph.items():
+                if hasattr(node, 'risk_score'):
+                    # Real EntityNode objects
+                    graph.add_node(entity_id, risk_score=node.risk_score, entity_type=node.entity_type)
+                    if hasattr(node, 'relationships'):
+                        for related_id in node.relationships:
+                            graph.add_edge(entity_id, related_id)
+                elif isinstance(node, list):
+                    # Simple adjacency list format: {entity: [connected_entities]}
+                    graph.add_node(entity_id)
+                    for related_id in node:
+                        graph.add_edge(entity_id, related_id)
+                else:
+                    graph.add_node(entity_id)
+        
+        # Add edges from relationships attribute if it's iterable
+        relationships = getattr(package, 'relationships', None)
+        if relationships and hasattr(relationships, '__iter__'):
+            try:
+                for rel in relationships:
+                    if hasattr(rel, 'from_entity') and hasattr(rel, 'to_entity'):
+                        graph.add_edge(rel.from_entity, rel.to_entity,
+                                       relationship_type=rel.relationship_type)
+            except TypeError:
+                pass  # Mock or non-iterable
+        
+        return graph
+    
     def _identify_target_service(self, package: Any) -> str:
         """Identify the primary target service from investigation package."""
         
@@ -254,7 +285,7 @@ class RCAEngineIntegration:
         return package.impacted_assets[0] if package.impacted_assets else target
     
     def _calculate_anomaly_scores(self, package: Any) -> Dict[str, float]:
-        """Calculate anomaly scores from investigation events."""
+        """Calculate per-entity anomaly scores (max risk per entity)."""
         
         scores = {}
         
@@ -269,17 +300,23 @@ class RCAEngineIntegration:
         return scores
     
     def _extract_anomalies(self, package: Any) -> List[Dict]:
-        """Extract anomalies from investigation package."""
+        """Extract anomalies from investigation package in CausalAnalyzer format."""
         
         anomalies = []
         
         for event in package.raw_events:
-            if event.get('risk_score', 0) > 0.5:
+            risk = event.get('risk_score', 0)
+            if risk > 0.3:
+                entity = event.get('entity', 'unknown')
                 anomalies.append({
-                    'timestamp': event.get('timestamp'),
-                    'entity': event.get('entity'),
-                    'action': event.get('action'),
-                    'severity': self._calculate_severity(event.get('risk_score', 0))
+                    'service': entity,            # CausalAnalyzer key
+                    'timestamp': event.get('timestamp', datetime.now().isoformat()),
+                    'anomaly_score': risk,         # CausalAnalyzer key
+                    'metric': event.get('action', 'alert'),
+                    'action': event.get('action', ''),
+                    'risk_score': risk,
+                    'entity': entity,
+                    'severity': self._calculate_severity(risk)
                 })
         
         return anomalies

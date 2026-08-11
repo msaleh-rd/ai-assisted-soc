@@ -96,6 +96,12 @@ class TemporalFilter:
         relevant_events = []
         for event in events:
             event_time = self._parse_timestamp(event)
+            # Normalize timezone awareness for comparison
+            if event_time.tzinfo is not None and window_start.tzinfo is None:
+                event_time = event_time.replace(tzinfo=None)
+            elif event_time.tzinfo is None and window_start.tzinfo is not None:
+                from datetime import timezone as tz
+                event_time = event_time.replace(tzinfo=tz.utc)
             if window_start <= event_time <= window_end:
                 relevant_events.append(event)
         
@@ -164,10 +170,16 @@ class EntityCorrelator:
     @staticmethod
     def _extract_entity_key(event: Dict) -> Tuple:
         """Extract unique entity key from event."""
+        # Support both detailed fields and simplified entity/action format
+        entity = event.get('entity', '')
+        if entity:
+            action = event.get('action', 'unknown')
+            return (entity, action)
+        
         user = event.get('user', 'unknown')
         host = event.get('host', 'unknown')
         process = event.get('process', 'unknown')
-        action_type = event.get('action_type', 'unknown')
+        action_type = event.get('action_type', event.get('action', 'unknown'))
         
         return (user, host, process, action_type)
     
@@ -176,18 +188,30 @@ class EntityCorrelator:
                                 events: List[Dict]) -> CorrelatedEvent:
         """Aggregate multiple events from same entity."""
         
-        user, host, process, action = entity_key
         first_event = min(events, key=lambda e: EntityCorrelator._parse_timestamp(e))
+        
+        # Handle both key formats
+        if len(entity_key) == 2:
+            entity_id = entity_key[0]
+            action = entity_key[1]
+        else:
+            user, host, process, action = entity_key
+            entity_id = f"{user}@{host}"
+        
+        # Compute risk score from raw events
+        risk_scores = [e.get('risk_score', 0) for e in events]
+        max_risk = max(risk_scores) if risk_scores else 0.0
         
         corr_event = CorrelatedEvent(
             event_id=f"{hashlib.md5(str(entity_key).encode()).hexdigest()}",
             timestamp=EntityCorrelator._parse_timestamp(first_event),
-            event_type=first_event.get('event_type', 'unknown'),
-            entity_type='entity_group',
-            entity_id=f"{user}@{host}",
+            event_type=first_event.get('event_type', first_event.get('action', 'unknown')),
+            entity_type=first_event.get('entity_type', 'entity'),
+            entity_id=entity_id,
             action=action,
             raw_events=events,
-            compression_ratio=len(events)
+            compression_ratio=len(events),
+            risk_score=max_risk
         )
         
         return corr_event
@@ -211,7 +235,7 @@ class BehavioralFilter:
     Reduction: 60-80%
     """
     
-    def __init__(self, contamination: float = 0.1):
+    def __init__(self, contamination: float = 0.4):
         """
         Args:
             contamination: Fraction of events expected to be anomalous
@@ -225,12 +249,17 @@ class BehavioralFilter:
         if not events:
             return [], 1.0
         
-        anomalous_events = []
-        
+        scored_events = []
         for event in events:
-            anomaly_score = self._calculate_anomaly_score(event)
-            if anomaly_score > (1.0 - self.contamination):
-                anomalous_events.append(event)
+            score = self._calculate_anomaly_score(event)
+            scored_events.append((event, score))
+        
+        threshold = 1.0 - self.contamination
+        anomalous_events = [e for e, s in scored_events if s >= threshold]
+        
+        # If filter removed everything, keep all events (no baseline to judge)
+        if not anomalous_events and events:
+            anomalous_events = events
         
         reduction = 1.0 - (len(anomalous_events) / len(events)) if events else 1.0
         
@@ -255,7 +284,16 @@ class BehavioralFilter:
             # Combined anomaly score
             return min(1.0, (time_anomaly + action_anomaly) / 2)
         
-        # No baseline, use default
+        # No baseline - use existing risk_score if available
+        if event.risk_score > 0:
+            return event.risk_score
+        
+        # Check raw events for risk scores
+        raw_risks = [e.get('risk_score', 0) for e in event.raw_events if e.get('risk_score', 0) > 0]
+        if raw_risks:
+            return max(raw_risks)
+        
+        # Truly unknown - return moderate score
         return 0.5
 
 
@@ -487,17 +525,21 @@ class RiskScorer:
         """Score events by risk level."""
         
         for event in events:
+            # Preserve existing risk score from raw events if already set
+            existing_risk = event.risk_score
+            
             # Base risk from compression ratio
             base_risk = min(event.compression_ratio / 100, 1.0)
             
             # Risk boost from detected patterns
             pattern_boost = self._calculate_pattern_boost(event, patterns)
             
-            # Final risk score
-            event.risk_score = min(1.0, base_risk + pattern_boost)
+            # Use max of existing risk and computed risk
+            computed_risk = min(1.0, base_risk + pattern_boost)
+            event.risk_score = max(existing_risk, computed_risk)
             
             # Confidence based on evidence quality
-            event.confidence = min(1.0, len(event.raw_events) / 10)
+            event.confidence = max(event.confidence, min(1.0, len(event.raw_events) / 10))
         
         # Filter low-risk events
         high_risk_events = [e for e in events if e.risk_score > 0.3]

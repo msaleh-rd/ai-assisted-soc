@@ -167,6 +167,31 @@ class EntityGraphBuilder:
                     # Add relationship reference to entities
                     if from_entity in self.entities:
                         self.entities[from_entity].relationships.append(to_entity)
+        
+        # Build temporal sequence relationships between distinct entities
+        # Events sorted by time imply causal flow: entity_A (earlier) -> entity_B (later)
+        sorted_events = sorted(events, key=lambda e: e.timestamp)
+        prev_entity = None
+        for event in sorted_events:
+            curr_entity = event.entity_id
+            if prev_entity and prev_entity != curr_entity:
+                edge_key = (prev_entity, curr_entity, 'temporal_sequence')
+                if edge_key not in seen_edges:
+                    relationship = RelationshipEdge(
+                        from_entity=prev_entity,
+                        to_entity=curr_entity,
+                        relationship_type='temporal_sequence',
+                        timestamp=event.timestamp,
+                        confidence=event.confidence,
+                        evidence_events=event.raw_events
+                    )
+                    self.relationships.append(relationship)
+                    seen_edges.add(edge_key)
+                    
+                    if prev_entity in self.entities:
+                        if curr_entity not in self.entities[prev_entity].relationships:
+                            self.entities[prev_entity].relationships.append(curr_entity)
+            prev_entity = curr_entity
     
     @staticmethod
     def _infer_entity_type(event: CorrelatedEvent) -> str:
@@ -469,7 +494,8 @@ class InvestigationPackageBuilder:
                     'timestamp': e.timestamp.isoformat(),
                     'event_type': e.event_type,
                     'entity': e.entity_id,
-                    'action': e.action
+                    'action': e.action,
+                    'risk_score': e.risk_score
                 }
                 for e in compressed_package.events
             ]
