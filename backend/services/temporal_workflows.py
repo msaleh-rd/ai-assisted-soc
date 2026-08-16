@@ -111,6 +111,7 @@ async def evidence_activity(inputs: Dict[str, Any]) -> Dict[str, Any]:
 @activity.defn(name="discovery_activity")
 async def discovery_activity(inputs: Dict[str, Any]) -> Dict[str, Any]:
     """Run the NetworkDiscoveryAgent."""
+
     from backend.services.orchestrator import NetworkDiscoveryAgent
     agent = NetworkDiscoveryAgent()
     report = await agent.execute(inputs, {})

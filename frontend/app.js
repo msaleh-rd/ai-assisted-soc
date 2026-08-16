@@ -781,6 +781,7 @@ function setDemoStep(num, state, resultText) {
 // === Init ===
 document.addEventListener('DOMContentLoaded', () => {
     loadAlertTemplate();
+    loadOrchTemplate();
     refreshDashboard();
     // Auto-refresh dashboard every 30 seconds
     setInterval(() => {
@@ -869,7 +870,11 @@ let orchStartTime = null;
 let orchEventCount = 0;
 
 function loadOrchTemplate() {
-    // No-op, template selection is used at run time
+    const templateKey = document.getElementById('orchAlertTemplate').value;
+    const alertData = ORCH_TEMPLATES[templateKey];
+    if (alertData) {
+        document.getElementById('orchAlertJson').value = JSON.stringify(alertData, null, 2);
+    }
 }
 
 async function runOrchestration() {
@@ -886,9 +891,18 @@ async function runOrchestration() {
     // Reset UI
     resetOrchUI();
 
-    const templateKey = document.getElementById('orchAlertTemplate').value;
     const task = document.getElementById('orchTask').value || 'Investigate security alert';
-    const alertData = ORCH_TEMPLATES[templateKey];
+    let alertData = null;
+    try {
+        alertData = JSON.parse(document.getElementById('orchAlertJson').value);
+    } catch (e) {
+        addOrchLog('error', 'orchestrator', `Invalid JSON Alert Data: ${e.message}`);
+        setOrchStatus('failed');
+        btn.disabled = false;
+        btn.textContent = '▶ Run Agentic Investigation';
+        orchRunning = false;
+        return;
+    }
 
     // Start timer
     orchStartTime = Date.now();
@@ -900,8 +914,22 @@ async function runOrchestration() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ task, alert_data: alertData }),
         });
+        
+        let reader = null;
+        const contentType = response.headers.get('content-type');
+        if (contentType && contentType.includes('application/json')) {
+            // Temporal mode: got workflow JSON back, need to connect to stream
+            const resJson = await response.json();
+            const workflowId = resJson.workflow_id;
+            addOrchLog('info', 'orchestrator', `Temporal workflow started: ${workflowId}`);
+            
+            const streamRes = await fetch(`/api/v3/orchestrator/investigate/${workflowId}/stream`);
+            reader = streamRes.body.getReader();
+        } else {
+            // Legacy in-memory mode: stream is returned directly
+            reader = response.body.getReader();
+        }
 
-        const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
 
