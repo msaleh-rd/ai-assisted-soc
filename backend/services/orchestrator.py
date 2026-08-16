@@ -116,41 +116,25 @@ class TriageAgent(BaseAgent):
         start = time.time()
         alert = inputs.get("alert", {})
 
-        # Simulate intelligent triage
-        await asyncio.sleep(0.3)
-
-        severity = alert.get("severity_name", alert.get("severity", "Medium"))
-        entities_found = []
-        if alert.get("user"):
-            entities_found.append({"type": "user", "id": alert["user"]})
-        if alert.get("hostname"):
-            entities_found.append({"type": "host", "id": alert["hostname"]})
-        if alert.get("src_ip") or alert.get("ip"):
-            entities_found.append({"type": "ip", "id": alert.get("src_ip", alert.get("ip", ""))})
-        if alert.get("file_hash"):
-            entities_found.append({"type": "file", "id": alert["file_hash"]})
-        if alert.get("process_name"):
-            entities_found.append({"type": "process", "id": alert["process_name"]})
-        if alert.get("domain"):
-            entities_found.append({"type": "domain", "id": alert["domain"]})
-
-        # Auto-extract from nested alert object
-        nested = alert.get("alert", {})
-        if nested:
-            if nested.get("user_name"):
-                entities_found.append({"type": "user", "id": nested["user_name"]})
-            if nested.get("computer_name"):
-                entities_found.append({"type": "host", "id": nested["computer_name"]})
-            if nested.get("sha256"):
-                entities_found.append({"type": "file", "id": nested["sha256"][:16] + "..."})
-            if nested.get("file_name"):
-                entities_found.append({"type": "process", "id": nested["file_name"]})
-            if nested.get("local_ip"):
-                entities_found.append({"type": "ip", "id": nested["local_ip"]})
-
-        classification = "malware_execution"
-        tactic = nested.get("tactic", alert.get("tactic", "Unknown"))
-        technique = nested.get("technique_id", alert.get("technique_id", ""))
+        from backend.services.llm_client import get_llm, TriageOutput
+        import json
+        
+        llm = get_llm()
+        structured_llm = llm.with_structured_output(TriageOutput)
+        
+        prompt = f"Analyze the following security alert and provide a triage assessment:\n\n{json.dumps(alert, indent=2)}"
+        
+        try:
+            # Langchain invoke is synchronous by default unless we use ainvoke, but LM Studio structured output might work best synchronously or with run_in_executor
+            # We'll use ainvoke to not block the asyncio event loop
+            result = await structured_llm.ainvoke(prompt)
+            findings = result.model_dump()
+            findings["entity_count"] = len(findings.get("entities_identified", []))
+            confidence = 0.95
+        except Exception as e:
+            # Fallback if LLM fails
+            findings = {"error": str(e), "requires_immediate_action": True, "severity": "High"}
+            confidence = 0.0
 
         return AgentReport(
             agent_name=self.name,
@@ -159,17 +143,8 @@ class TriageAgent(BaseAgent):
             started_at=datetime.fromtimestamp(start).isoformat(),
             completed_at=datetime.now().isoformat(),
             duration_ms=int((time.time() - start) * 1000),
-            findings={
-                "severity": severity,
-                "classification": classification,
-                "tactic": tactic,
-                "technique": technique,
-                "entities_identified": entities_found,
-                "entity_count": len(entities_found),
-                "requires_immediate_action": severity in ("Critical", "High", 4, 5),
-                "initial_assessment": f"Detected {classification} activity via {tactic} tactic. {len(entities_found)} entities identified for investigation.",
-            },
-            confidence=0.85,
+            findings=findings,
+            confidence=confidence,
             artifacts=["triage_report", "entity_list"],
         )
 
@@ -362,24 +337,22 @@ class RCAAnalystAgent(BaseAgent):
         entity_graph = inputs.get("entity_graph", {})
         classification = inputs.get("classification", "unknown")
 
-        await asyncio.sleep(0.6)
+        from backend.services.llm_client import get_llm, RCAOutput
+        import json
 
-        # Determine root cause from entity graph
-        high_risk_entities = [
-            eid for eid, data in entity_graph.items()
-            if data.get("risk_score", 0) >= 0.6
-        ]
+        llm = get_llm()
+        structured_llm = llm.with_structured_output(RCAOutput)
 
-        attack_chain = []
-        if any("user" in e for e in entity_graph):
-            attack_chain.append({"phase": "Initial Access", "description": "Compromised user account or social engineering"})
-        if any("process" in e or "file" in e for e in entity_graph):
-            attack_chain.append({"phase": "Execution", "description": "Malicious payload executed on endpoint"})
-        if any("ip" in e for e in entity_graph):
-            attack_chain.append({"phase": "Command & Control", "description": "Communication with external infrastructure"})
-        attack_chain.append({"phase": "Impact", "description": "Data access or system compromise"})
+        prompt = f"Perform Root Cause Analysis on the following entity graph and classification '{classification}'.\n\nEntity Graph: {json.dumps(entity_graph, indent=2)}\n\nDetermine the root cause, attack phases, and blast radius."
 
-        root_cause_entity = high_risk_entities[0] if high_risk_entities else list(entity_graph.keys())[0] if entity_graph else "unknown"
+        try:
+            result = await structured_llm.ainvoke(prompt)
+            findings = result.model_dump()
+            confidence = findings.get("confidence", 0.85)
+            findings["summary"] = f"Root cause identified: {findings.get('root_cause')}. Attack chain: {len(findings.get('attack_phases', []))} phases. Blast radius: {findings.get('blast_radius')} entities."
+        except Exception as e:
+            findings = {"error": str(e), "root_cause": "Unknown due to LLM error", "attack_phases": [], "blast_radius": 0, "summary": str(e)}
+            confidence = 0.0
 
         return AgentReport(
             agent_name=self.name,
@@ -388,17 +361,8 @@ class RCAAnalystAgent(BaseAgent):
             started_at=datetime.fromtimestamp(start).isoformat(),
             completed_at=datetime.now().isoformat(),
             duration_ms=int((time.time() - start) * 1000),
-            findings={
-                "root_cause": root_cause_entity,
-                "confidence_score": 0.82,
-                "attack_chain": attack_chain,
-                "attack_chain_length": len(attack_chain),
-                "blast_radius": len(entity_graph),
-                "high_risk_entities": high_risk_entities,
-                "classification": classification,
-                "summary": f"Root cause identified: {root_cause_entity}. Attack chain: {len(attack_chain)} phases. Blast radius: {len(entity_graph)} entities.",
-            },
-            confidence=0.82,
+            findings=findings,
+            confidence=confidence,
             artifacts=["attack_chain_graph", "causal_analysis", "blast_radius_map"],
         )
 
@@ -415,61 +379,39 @@ class ResponsePlannerAgent(BaseAgent):
         attack_chain = inputs.get("attack_chain", [])
         entities = inputs.get("entities", [])
 
-        await asyncio.sleep(0.3)
+        from backend.services.llm_client import get_llm, ResponseOutput
+        from langchain_community.vectorstores import FAISS
+        from langchain_community.embeddings import HuggingFaceEmbeddings
+        import json
 
-        # Generate response actions based on findings
-        actions = []
-        if any(e.get("type") == "host" for e in entities):
-            host = next(e for e in entities if e["type"] == "host")
-            actions.append({
-                "action": "isolate_host",
-                "target": host["id"],
-                "priority": "critical",
-                "reason": "Contain compromised endpoint",
-                "status": "recommended",
-            })
-        if any(e.get("type") == "user" for e in entities):
-            user = next(e for e in entities if e["type"] == "user")
-            actions.append({
-                "action": "reset_credentials",
-                "target": user["id"],
-                "priority": "critical",
-                "reason": "Prevent further unauthorized access",
-                "status": "recommended",
-            })
-            actions.append({
-                "action": "enforce_mfa",
-                "target": user["id"],
-                "priority": "high",
-                "reason": "Strengthen authentication post-compromise",
-                "status": "recommended",
-            })
-        if any(e.get("type") == "ip" for e in entities):
-            ip_ent = next(e for e in entities if e["type"] == "ip")
-            actions.append({
-                "action": "block_ip",
-                "target": ip_ent["id"],
-                "priority": "high",
-                "reason": "Block C2 communication channel",
-                "status": "recommended",
-            })
-        if any(e.get("type") == "process" for e in entities):
-            proc = next(e for e in entities if e["type"] == "process")
-            actions.append({
-                "action": "kill_process",
-                "target": proc["id"],
-                "priority": "critical",
-                "reason": "Terminate malicious process",
-                "status": "recommended",
-            })
-        if any(e.get("type") == "file" for e in entities):
-            actions.append({
-                "action": "quarantine_file",
-                "target": "malicious binary",
-                "priority": "high",
-                "reason": "Prevent re-execution of payload",
-                "status": "recommended",
-            })
+        # 1. RAG Step: Retrieve playbook
+        playbooks = [
+            "Playbook: Malware Execution. Steps: 1. Isolate Host. 2. Quarantine File. 3. Kill Process.",
+            "Playbook: Lateral Movement. Steps: 1. Reset Credentials. 2. Enforce MFA. 3. Block IP.",
+            "Playbook: Data Exfiltration. Steps: 1. Block IP. 2. Isolate Host. 3. Revoke Tokens."
+        ]
+        # Use a fast local embedding model
+        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        vectorstore = FAISS.from_texts(playbooks, embeddings)
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 1})
+        
+        query = f"Find playbook for root cause: {root_cause} and attack chain: {attack_chain}"
+        docs = retriever.invoke(query)
+        playbook_context = docs[0].page_content if docs else "No specific playbook found."
+
+        # 2. LLM Step: Plan response
+        llm = get_llm()
+        structured_llm = llm.with_structured_output(ResponseOutput)
+        
+        prompt = f"Plan response actions based on the following context.\n\nRoot Cause: {root_cause}\nAttack Chain: {attack_chain}\nEntities: {json.dumps(entities)}\n\nRetrieved Playbook:\n{playbook_context}"
+
+        try:
+            result = await structured_llm.ainvoke(prompt)
+            findings = result.model_dump()
+            confidence = 0.90
+        except Exception as e:
+            findings = {"error": str(e), "actions_recommended": [], "critical_actions": 0, "summary": str(e)}
+            confidence = 0.0
 
         return AgentReport(
             agent_name=self.name,
