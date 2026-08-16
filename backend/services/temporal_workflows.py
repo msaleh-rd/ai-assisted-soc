@@ -1,0 +1,444 @@
+"""Temporal Workflow and Activities for SOC Investigation Orchestration.
+
+Wraps the existing agent-based orchestrator into durable Temporal Workflows.
+Each sub-agent becomes a Temporal Activity; the overall investigation
+becomes an InvestigationWorkflow with phased execution.
+"""
+
+import asyncio
+import uuid
+import time
+from dataclasses import dataclass, field, asdict
+from datetime import timedelta, datetime
+from typing import Any, Dict, List, Optional
+
+from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
+
+# -- We must use the sandbox-safe imports inside workflow code.
+# -- Activities run outside the sandbox and can import anything.
+
+# ============================================================
+# Shared data-transfer objects (must be serialisable)
+# ============================================================
+
+@dataclass
+class AgentReportDTO:
+    """Serialisable mirror of orchestrator.AgentReport for Temporal payloads."""
+    agent_name: str
+    task: str
+    status: str  # "completed" | "failed"
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    duration_ms: int = 0
+    findings: Dict[str, Any] = field(default_factory=dict)
+    confidence: float = 0.0
+    artifacts: List[str] = field(default_factory=list)
+    error: Optional[str] = None
+
+
+@dataclass
+class InvestigationInput:
+    """Input payload for an investigation workflow."""
+    task: str
+    alert_data: Dict[str, Any]
+
+
+@dataclass
+class PhaseProgress:
+    """Tracks a single execution phase."""
+    phase_num: int
+    parallel: bool
+    agents: List[str]
+    status: str  # "pending" | "running" | "completed"
+    reports: List[AgentReportDTO] = field(default_factory=dict)
+
+
+@dataclass
+class InvestigationProgress:
+    """Queryable progress state for a running investigation."""
+    run_id: str
+    status: str  # "planning" | "running" | "completed" | "failed"
+    current_phase: int
+    total_phases: int
+    plan_reasoning: str = ""
+    phases: List[Dict[str, Any]] = field(default_factory=list)
+    completed_reports: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    synthesis: Optional[Dict[str, Any]] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    total_duration_ms: int = 0
+
+
+# ============================================================
+# Activities — thin wrappers around existing agent classes
+# ============================================================
+
+def _agent_report_to_dto(report) -> AgentReportDTO:
+    """Convert an orchestrator.AgentReport to a serialisable DTO."""
+    return AgentReportDTO(
+        agent_name=report.agent_name,
+        task=report.task,
+        status=report.status.value,
+        started_at=report.started_at,
+        completed_at=report.completed_at,
+        duration_ms=report.duration_ms,
+        findings=report.findings,
+        confidence=report.confidence,
+        artifacts=report.artifacts,
+        error=report.error,
+    )
+
+
+@activity.defn(name="triage_activity")
+async def triage_activity(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """Run the TriageAgent on the alert data."""
+    from backend.services.orchestrator import TriageAgent
+    agent = TriageAgent()
+    report = await agent.execute(inputs, {})
+    return asdict(_agent_report_to_dto(report))
+
+
+@activity.defn(name="evidence_activity")
+async def evidence_activity(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """Run the EvidenceAgent to expand entity graph."""
+    from backend.services.orchestrator import EvidenceAgent
+    agent = EvidenceAgent()
+    report = await agent.execute(inputs, {})
+    return asdict(_agent_report_to_dto(report))
+
+
+@activity.defn(name="discovery_activity")
+async def discovery_activity(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """Run the NetworkDiscoveryAgent."""
+    from backend.services.orchestrator import NetworkDiscoveryAgent
+    agent = NetworkDiscoveryAgent()
+    report = await agent.execute(inputs, {})
+    return asdict(_agent_report_to_dto(report))
+
+
+@activity.defn(name="compression_activity")
+async def compression_activity(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """Run the CompressionAgent (7-stage pipeline)."""
+    from backend.services.orchestrator import CompressionAgent
+    agent = CompressionAgent()
+    report = await agent.execute(inputs, {})
+    return asdict(_agent_report_to_dto(report))
+
+
+@activity.defn(name="rca_activity")
+async def rca_activity(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """Run the RCAAnalystAgent."""
+    from backend.services.orchestrator import RCAAnalystAgent
+    agent = RCAAnalystAgent()
+    report = await agent.execute(inputs, {})
+    return asdict(_agent_report_to_dto(report))
+
+
+@activity.defn(name="response_activity")
+async def response_activity(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """Run the ResponsePlannerAgent."""
+    from backend.services.orchestrator import ResponsePlannerAgent
+    agent = ResponsePlannerAgent()
+    report = await agent.execute(inputs, {})
+    return asdict(_agent_report_to_dto(report))
+
+
+# Map of activity names to functions (used by the worker to register)
+ALL_ACTIVITIES = [
+    triage_activity,
+    evidence_activity,
+    discovery_activity,
+    compression_activity,
+    rca_activity,
+    response_activity,
+]
+
+
+# ============================================================
+# Workflow — durable investigation orchestration
+# ============================================================
+
+@workflow.defn(name="InvestigationWorkflow")
+class InvestigationWorkflow:
+    """
+    Durable investigation workflow that:
+    1. Plans sub-tasks from the alert (same logic as OrchestratorAgent)
+    2. Executes each phase by invoking Activity functions
+    3. Runs parallel activities within a phase via asyncio.gather
+    4. Stores progress queryable via Temporal Queries
+    5. Synthesises final result
+    """
+
+    def __init__(self):
+        self._progress = InvestigationProgress(
+            run_id="",
+            status="pending",
+            current_phase=0,
+            total_phases=0,
+        )
+
+    @workflow.query(name="get_progress")
+    def get_progress(self) -> Dict[str, Any]:
+        """Return current investigation progress (called by API via Temporal Query)."""
+        return asdict(self._progress)
+
+    @workflow.run
+    async def run(self, input: InvestigationInput) -> Dict[str, Any]:
+        run_id = f"run-{workflow.info().workflow_id[:8]}"
+        run_start = workflow.now()
+
+        self._progress.run_id = run_id
+        self._progress.status = "planning"
+        self._progress.started_at = run_start.isoformat()
+
+        # ---- PLANNING (deterministic, no IO) ----
+        plan = self._build_plan(input.alert_data)
+
+        self._progress.total_phases = len(plan)
+        self._progress.plan_reasoning = (
+            "1) Triage first to understand severity and extract entities. "
+            "2) Evidence collection and network discovery run in PARALLEL. "
+            "3) Compression needs evidence data, so it waits. "
+            "4) RCA needs both compressed evidence AND network context. "
+            "5) Response planning depends on root cause identification."
+        )
+        self._progress.phases = [
+            {
+                "phase_num": i + 1,
+                "parallel": len(phase) > 1,
+                "agents": [t["agent"] for t in phase],
+                "status": "pending",
+            }
+            for i, phase in enumerate(plan)
+        ]
+        self._progress.status = "running"
+
+        # ---- EXECUTION ----
+        all_reports: Dict[str, Dict[str, Any]] = {}
+
+        # Retry policy for all activities
+        retry_policy = RetryPolicy(
+            initial_interval=timedelta(seconds=1),
+            backoff_coefficient=2.0,
+            maximum_attempts=3,
+            maximum_interval=timedelta(seconds=30),
+        )
+
+        for phase_idx, phase_tasks in enumerate(plan):
+            phase_num = phase_idx + 1
+            is_parallel = len(phase_tasks) > 1
+            self._progress.current_phase = phase_num
+            self._progress.phases[phase_idx]["status"] = "running"
+
+            # Resolve inputs from previous phase reports
+            resolved = []
+            for task_def in phase_tasks:
+                task_inputs = self._resolve_inputs(
+                    task_def["agent"], all_reports, input.alert_data
+                )
+                resolved.append((task_def, task_inputs))
+
+            # Execute activities
+            if is_parallel:
+                # Run activities concurrently
+                results = await asyncio.gather(
+                    *[
+                        workflow.execute_activity(
+                            td["activity"],
+                            args=[ti],
+                            start_to_close_timeout=timedelta(seconds=60),
+                            retry_policy=retry_policy,
+                        )
+                        for td, ti in resolved
+                    ]
+                )
+                for (task_def, _), result in zip(resolved, results):
+                    all_reports[task_def["id"]] = result
+                    self._progress.completed_reports[task_def["id"]] = result
+            else:
+                task_def, task_inputs = resolved[0]
+                result = await workflow.execute_activity(
+                    task_def["activity"],
+                    args=[task_inputs],
+                    start_to_close_timeout=timedelta(seconds=60),
+                    retry_policy=retry_policy,
+                )
+                all_reports[task_def["id"]] = result
+                self._progress.completed_reports[task_def["id"]] = result
+
+            self._progress.phases[phase_idx]["status"] = "completed"
+
+        # ---- SYNTHESIS ----
+        synthesis = self._synthesize(all_reports)
+
+        total_duration_ms = int(
+            (workflow.now() - run_start).total_seconds() * 1000
+        )
+
+        self._progress.status = "completed"
+        self._progress.synthesis = synthesis
+        self._progress.completed_at = workflow.now().isoformat()
+        self._progress.total_duration_ms = total_duration_ms
+
+        return {
+            "run_id": run_id,
+            "status": "completed",
+            "total_duration_ms": total_duration_ms,
+            "synthesis": synthesis,
+            "reports": all_reports,
+        }
+
+    # ----------------------------------------------------------------
+    # Internal helpers (deterministic, no IO — safe inside workflow)
+    # ----------------------------------------------------------------
+
+    def _build_plan(self, alert_data: Dict[str, Any]) -> List[List[Dict]]:
+        """Build the phased execution plan (mirrors OrchestratorAgent.plan)."""
+        return [
+            # Phase 1: Triage (serial)
+            [
+                {
+                    "id": "task-triage",
+                    "agent": "triage_agent",
+                    "activity": "triage_activity",
+                    "description": "Analyze alert severity, classify threat, identify entities",
+                }
+            ],
+            # Phase 2: Evidence + Discovery (parallel)
+            [
+                {
+                    "id": "task-evidence",
+                    "agent": "evidence_agent",
+                    "activity": "evidence_activity",
+                    "description": "Expand entity graph and collect evidence",
+                },
+                {
+                    "id": "task-discovery",
+                    "agent": "discovery_agent",
+                    "activity": "discovery_activity",
+                    "description": "Probe network reachability and open ports",
+                },
+            ],
+            # Phase 3: Compression (serial)
+            [
+                {
+                    "id": "task-compression",
+                    "agent": "compression_agent",
+                    "activity": "compression_activity",
+                    "description": "7-stage event noise reduction pipeline",
+                }
+            ],
+            # Phase 4: RCA (serial, depends on compression + discovery)
+            [
+                {
+                    "id": "task-rca",
+                    "agent": "rca_agent",
+                    "activity": "rca_activity",
+                    "description": "Root cause analysis and attack chain reconstruction",
+                }
+            ],
+            # Phase 5: Response (serial)
+            [
+                {
+                    "id": "task-response",
+                    "agent": "response_agent",
+                    "activity": "response_activity",
+                    "description": "Generate prioritised response plan",
+                }
+            ],
+        ]
+
+    def _resolve_inputs(
+        self,
+        agent_name: str,
+        reports: Dict[str, Dict[str, Any]],
+        alert_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Resolve inputs for a given agent from previous reports."""
+        inputs: Dict[str, Any] = {}
+
+        if agent_name == "triage_agent":
+            inputs["alert"] = alert_data
+
+        elif agent_name == "evidence_agent":
+            triage = reports.get("task-triage", {})
+            inputs["entities"] = triage.get("findings", {}).get(
+                "entities_identified", []
+            )
+
+        elif agent_name == "discovery_agent":
+            triage = reports.get("task-triage", {})
+            inputs["entities"] = triage.get("findings", {}).get(
+                "entities_identified", []
+            )
+
+        elif agent_name == "compression_agent":
+            evidence = reports.get("task-evidence", {})
+            inputs["entity_count"] = evidence.get("findings", {}).get(
+                "entity_graph_size", 5
+            )
+
+        elif agent_name == "rca_agent":
+            evidence = reports.get("task-evidence", {})
+            triage = reports.get("task-triage", {})
+            inputs["entity_graph"] = evidence.get("findings", {}).get(
+                "entity_graph", {}
+            )
+            inputs["classification"] = triage.get("findings", {}).get(
+                "classification", "unknown"
+            )
+
+        elif agent_name == "response_agent":
+            rca = reports.get("task-rca", {})
+            triage = reports.get("task-triage", {})
+            inputs["root_cause"] = rca.get("findings", {}).get("root_cause", "")
+            inputs["attack_chain"] = rca.get("findings", {}).get("attack_chain", [])
+            inputs["entities"] = triage.get("findings", {}).get(
+                "entities_identified", []
+            )
+
+        return inputs
+
+    def _synthesize(self, reports: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        """Synthesise all agent reports into a final verdict."""
+        triage = reports.get("task-triage", {}).get("findings", {})
+        evidence = reports.get("task-evidence", {}).get("findings", {})
+        compression = reports.get("task-compression", {}).get("findings", {})
+        rca = reports.get("task-rca", {}).get("findings", {})
+        response = reports.get("task-response", {}).get("findings", {})
+
+        severity = triage.get("severity", "Unknown")
+        root_cause = rca.get("root_cause", "Undetermined")
+        confidence = rca.get("confidence_score", 0)
+        total_actions = response.get("total_actions", 0)
+        compression_ratio = compression.get("compression_ratio", "N/A")
+        blast_radius = rca.get("blast_radius", 0)
+
+        if confidence >= 0.8:
+            verdict = "High-confidence root cause identified. Immediate response recommended."
+        elif confidence >= 0.5:
+            verdict = "Moderate confidence in findings. Consider additional investigation."
+        else:
+            verdict = "Low confidence. Adaptive re-investigation recommended."
+
+        return {
+            "verdict": verdict,
+            "severity": severity,
+            "root_cause": root_cause,
+            "confidence": confidence,
+            "blast_radius": blast_radius,
+            "compression_ratio": compression_ratio,
+            "response_actions": total_actions,
+            "agents_used": len(reports),
+            "all_succeeded": all(
+                r.get("status") == "completed" for r in reports.values()
+            ),
+            "executive_summary": (
+                f"Investigation complete. Severity: {severity}. "
+                f"Root cause: {root_cause} (confidence: {confidence:.0%}). "
+                f"Blast radius: {blast_radius} entities. "
+                f"Event noise reduced by {compression_ratio}. "
+                f"{total_actions} response actions recommended."
+            ),
+        }

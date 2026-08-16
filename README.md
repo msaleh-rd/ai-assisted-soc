@@ -23,16 +23,15 @@ Raw Alerts (Multiple Sources)
     ↓
 [Investigation Context]
     ↓
-[Evidence Collection Engine]
-├─ User evidence (profile, activity, risk)
-├─ Host evidence (posture, processes, config)
-├─ Process evidence (details, parent, behavior)
-├─ IP evidence (geolocation, reputation)
-├─ Domain evidence (registration, DNS, reputation)
-└─ File evidence (metadata, hashes, reputation)
+[Temporal Workflow Orchestrator] ← [Temporal Worker & Server]
+├─ Phase 1: Triage (serial)
+├─ Phase 2: Evidence Collection + Network Discovery (parallel)
+├─ Phase 3: Correlation & Compression (serial)
+├─ Phase 4: RCA Engine (serial)
+└─ Phase 5: Response Planning (serial)
     ↓
 [Enriched Investigation Context]
-└─ Ready for Correlation & Compression (Phase 2)
+└─ Ready for Analyst Review
 ```
 
 ## Project Structure
@@ -46,22 +45,22 @@ backend/
 │   ├── alert_normalizer.py      # Multi-vendor alert normalizers
 │   ├── alert_deduplicator.py    # Alert deduplication logic
 │   ├── alert_intake.py          # Main intake orchestration
-│   └── evidence_collection.py   # Entity expansion and enrichment
+│   ├── orchestrator.py          # Legacy agent execution logic
+│   ├── temporal_workflows.py    # Temporal Workflows & Activities
+│   ├── temporal_worker.py       # Standalone Temporal Worker
+│   └── temporal_client.py       # Temporal API Client
 ├── api/
 │   ├── routes/
 │   │   ├── alerts.py            # Alert ingestion endpoints
-│   │   └── investigations.py   # Investigation endpoints
+│   │   └── orchestrator.py      # Temporal workflow endpoints
 │   └── schemas.py               # Pydantic request/response schemas
 ├── database/
 │   ├── postgres.py              # PostgreSQL models
 │   └── neo4j.py                # Neo4j graph client
 ├── tests/
-│   ├── test_alert_normalizer.py
-│   ├── test_alert_deduplicator.py
-│   └── test_evidence_collection.py
 └── main.py                      # FastAPI application
 
-docker-compose.yml              # Local development setup
+docker-compose.yml              # Local development setup with Temporal
 requirements.txt                # Python dependencies
 Dockerfile                      # Container image
 ```
@@ -71,14 +70,14 @@ Dockerfile                      # Container image
 ### Using Docker Compose (Recommended)
 
 ```bash
-# Start all services
-docker-compose up -d
+# Start all services (includes Temporal, PostgreSQL, Neo4j, Redis, API, and Worker)
+docker compose up -d
 
 # Wait for services to be ready (~30 seconds)
 sleep 30
 
-# Check health
-curl http://localhost:8000/health
+# View Temporal Web UI
+open http://localhost:8080
 
 # View API docs
 open http://localhost:8000/docs
@@ -88,13 +87,21 @@ open http://localhost:8000/docs
 
 ```bash
 # Install dependencies
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-# Start FastAPI server
-uvicorn backend.main:app --reload --port 8000
+# Start backend dependencies & Temporal
+docker compose -f docker-compose-postgres.yml up -d
 
-# In another terminal, start PostgreSQL:
-docker-compose up postgres redis neo4j
+# Start Temporal Worker (Terminal 1)
+$env:TEMPORAL_HOST="localhost:7233"
+python -m backend.services.temporal_worker
+
+# Start FastAPI server (Terminal 2)
+$env:USE_TEMPORAL="true"
+$env:TEMPORAL_HOST="localhost:7233"
+uvicorn backend.main:app --reload --port 8000
 
 # Run tests
 pytest backend/tests/ -v

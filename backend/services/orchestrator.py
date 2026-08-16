@@ -184,8 +184,8 @@ class EvidenceAgent(BaseAgent):
         start = time.time()
         entities = inputs.get("entities", [])
 
-        from backend.services.evidence_collection import EvidenceOrchestrator
-        orchestrator = EvidenceOrchestrator()
+        from backend.services.evidence_collection import EvidenceCollectionOrchestrator
+        orchestrator = EvidenceCollectionOrchestrator()
 
         await asyncio.sleep(0.4)
 
