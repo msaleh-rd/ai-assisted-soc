@@ -1,6 +1,6 @@
 import os
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VECTORSTORE_DIR = os.path.join(BASE_DIR, "data", "vectorstore")
@@ -25,4 +25,4 @@ def get_retriever():
         # Allow dangerous deserialization because we generated the index locally
         _vectorstore = FAISS.load_local(VECTORSTORE_DIR, embeddings, allow_dangerous_deserialization=True)
         
-    return _vectorstore.as_retriever(search_kwargs={"k": 2})
+    return _vectorstore.as_retriever(search_kwargs={"k": 6})

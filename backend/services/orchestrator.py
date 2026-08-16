@@ -400,8 +400,10 @@ class ResponsePlannerAgent(BaseAgent):
         
         prompt = (
             "You are a strict security incident response planner. "
-            "You MUST extract the EXACT, VERBATIM steps from the 'Containment Actions' and 'Eradication & Recovery' sections "
-            "of the provided playbook below. Do not generalize or summarize the steps; copy them exactly as they appear.\n\n"
+            "Your task is to read the 'Containment Actions' and 'Eradication & Recovery' sections of the retrieved playbook below. "
+            "You MUST extract the individual bulleted or numbered steps UNDER those headers verbatim. "
+            "Do NOT just extract the bolded titles (e.g. 'Reset Credentials'). You MUST extract the ENTIRE sentence for each step, including the explanation and priority (e.g. 'Reset Credentials: Force a password reset for any compromised user accounts. (Priority: Critical)'). "
+            "Copy each actual full action step exactly as it appears in the text into the actions_recommended array.\n\n"
             f"Root Cause: {root_cause}\n"
             f"Attack Chain: {attack_chain}\n"
             f"Entities: {json.dumps(entities)}\n\n"

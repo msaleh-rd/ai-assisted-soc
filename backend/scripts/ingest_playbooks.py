@@ -3,7 +3,7 @@ import argparse
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 
 # Define paths relative to the project root
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
