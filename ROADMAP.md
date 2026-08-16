@@ -13,7 +13,8 @@ This document outlines the strategic phases required to take the current AI-Assi
 
 ## 🎯 Phase 4: True AI Integration (LLM Implementation)
 *Goal: Replace the current static/mocked agent outputs with real Large Language Models.*
-- [ ] **Agent Framework Integration:** Implement an AI framework (e.g., LangChain, LlamaIndex, or AutoGen) within the Temporal activities.
+- [ ] **Agent Framework Integration:** Implement an AI framework (e.g., LangChain, LlamaIndex, or AutoGen) within the Temporal 
+activities.
 - [ ] **Prompt Engineering:** Develop strict, deterministic system prompts for each agent (Triage, RCA, Response).
 - [ ] **Structured Outputs:** Enforce strict JSON schema outputs from the LLMs using tools like OpenAI structured outputs or Instructor to ensure the Orchestrator can parse the results.
 - [ ] **RAG for Playbooks:** Connect the Response Agent to a Vector Database containing the organization's incident response playbooks.

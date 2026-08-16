@@ -48,6 +48,6 @@ class RCAOutput(BaseModel):
 
 class ResponseOutput(BaseModel):
     """Schema for the ResponsePlannerAgent's structured output."""
-    actions_recommended: List[str] = Field(description="List of specific, actionable response steps to contain/mitigate the threat")
-    critical_actions: int = Field(description="The number of actions in the list that require immediate execution")
-    summary: str = Field(description="A brief summary explaining why these actions were chosen")
+    actions_recommended: List[str] = Field(description="Extract the exact, specific actionable response steps verbatim from the 'Containment Actions' and 'Eradication & Recovery' sections of the retrieved playbook.")
+    critical_actions: int = Field(description="The exact number of actions extracted that are marked as '(Priority: Critical)' in the playbook.")
+    summary: str = Field(description="A brief summary explaining why these specific playbook steps apply to this incident.")

@@ -380,30 +380,33 @@ class ResponsePlannerAgent(BaseAgent):
         entities = inputs.get("entities", [])
 
         from backend.services.llm_client import get_llm, ResponseOutput
-        from langchain_community.vectorstores import FAISS
-        from langchain_community.embeddings import HuggingFaceEmbeddings
+        from backend.services.rag_service import get_retriever
         import json
 
         # 1. RAG Step: Retrieve playbook
-        playbooks = [
-            "Playbook: Malware Execution. Steps: 1. Isolate Host. 2. Quarantine File. 3. Kill Process.",
-            "Playbook: Lateral Movement. Steps: 1. Reset Credentials. 2. Enforce MFA. 3. Block IP.",
-            "Playbook: Data Exfiltration. Steps: 1. Block IP. 2. Isolate Host. 3. Revoke Tokens."
-        ]
-        # Use a fast local embedding model
-        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        vectorstore = FAISS.from_texts(playbooks, embeddings)
-        retriever = vectorstore.as_retriever(search_kwargs={"k": 1})
-        
-        query = f"Find playbook for root cause: {root_cause} and attack chain: {attack_chain}"
-        docs = retriever.invoke(query)
-        playbook_context = docs[0].page_content if docs else "No specific playbook found."
+        try:
+            retriever = get_retriever()
+            query = f"Find playbook for root cause: {root_cause} and attack chain: {attack_chain}"
+            docs = retriever.invoke(query)
+            
+            # Combine the content of the top retrieved chunks
+            playbook_context = "\n\n".join([doc.page_content for doc in docs]) if docs else "No specific playbook found."
+        except Exception as e:
+            playbook_context = f"Failed to retrieve playbooks (Vectorstore might be uninitialized): {str(e)}"
 
         # 2. LLM Step: Plan response
         llm = get_llm()
         structured_llm = llm.with_structured_output(ResponseOutput)
         
-        prompt = f"Plan response actions based on the following context.\n\nRoot Cause: {root_cause}\nAttack Chain: {attack_chain}\nEntities: {json.dumps(entities)}\n\nRetrieved Playbook:\n{playbook_context}"
+        prompt = (
+            "You are a strict security incident response planner. "
+            "You MUST extract the EXACT, VERBATIM steps from the 'Containment Actions' and 'Eradication & Recovery' sections "
+            "of the provided playbook below. Do not generalize or summarize the steps; copy them exactly as they appear.\n\n"
+            f"Root Cause: {root_cause}\n"
+            f"Attack Chain: {attack_chain}\n"
+            f"Entities: {json.dumps(entities)}\n\n"
+            f"Retrieved Playbook (Extract actions exactly from here):\n{playbook_context}"
+        )
 
         try:
             result = await structured_llm.ainvoke(prompt)
@@ -420,15 +423,8 @@ class ResponsePlannerAgent(BaseAgent):
             started_at=datetime.fromtimestamp(start).isoformat(),
             completed_at=datetime.now().isoformat(),
             duration_ms=int((time.time() - start) * 1000),
-            findings={
-                "total_actions": len(actions),
-                "critical_actions": len([a for a in actions if a["priority"] == "critical"]),
-                "actions": actions,
-                "execution_order": "priority-based (critical → high → medium)",
-                "estimated_containment_time": "< 5 minutes",
-                "summary": f"Recommended {len(actions)} response actions. {len([a for a in actions if a['priority'] == 'critical'])} critical, requires immediate execution.",
-            },
-            confidence=0.88,
+            findings=findings,
+            confidence=confidence,
             artifacts=["response_plan", "action_sequence", "rollback_procedures"],
         )
 

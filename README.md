@@ -1,4 +1,4 @@
-# AI-Native SOC Platform - Phase 1 Implementation
+D:\projects\ai-assisted-soc# AI-Native SOC Platform - Phase 1 Implementation
 
 ## Overview
 
