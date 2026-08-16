@@ -21,6 +21,7 @@ from backend.services.response_orchestration import (
     IncidentLifecycleManager
 )
 from backend.services.report_generation import ReportGenerator, ReportType
+from backend.services.discovery.enricher import DiscoveryEnricher
 
 # Data models
 class RCARequest(BaseModel):
@@ -103,6 +104,7 @@ response_orchestrator = ResponseOrchestrator(approval_required=False)
 adaptive_manager = AdaptiveInvestigationManager()
 incident_manager = IncidentLifecycleManager()
 report_generator = ReportGenerator()
+discovery_enricher = DiscoveryEnricher()
 
 # In-memory storage (would be database in production)
 rca_results: Dict[str, Any] = {}
@@ -129,6 +131,25 @@ async def analyze_investigation(request: RCARequest):
             raise HTTPException(status_code=404, detail="Investigation package not found")
         
         investigation_package = investigation_packages[request.package_id]
+        
+        # Auto-enrich entities with discovery data before RCA
+        try:
+            entity_dict = {eid: {'entity_type': node.entity_type, 'risk_score': node.risk_score}
+                          for eid, node in investigation_package.entity_graph.items()}
+            enrichments = await discovery_enricher.enrich_entities(
+                entity_dict,
+                attributes=['reachability', 'hostname', 'open_ports'],
+            )
+            # Attach discovery data to entity nodes
+            for eid, data in enrichments.items():
+                if eid in investigation_package.entity_graph:
+                    investigation_package.entity_graph[eid].evidence.append({
+                        'source': 'discovery',
+                        'status': data.get('discovery_status'),
+                        'attributes': data.get('discovered_attributes', {}),
+                    })
+        except Exception:
+            pass  # Discovery enrichment is best-effort, don't block RCA
         
         # Perform RCA
         rca_result = await rca_engine.analyze_investigation(investigation_package)
@@ -455,14 +476,46 @@ async def health_check():
 
 # Helper function
 async def _stub_data_collector(query: Dict[str, Any]) -> List[Dict]:
-    """Stub data collector for adaptive investigation."""
+    """Data collector for adaptive investigation backed by network discovery."""
+    from backend.services.discovery.agent import DiscoveryAgent
     
-    # In production, would query actual data sources
+    entity = query.get('entity', '')
+    gap = query.get('gap', '')
+    
+    # Try real network discovery for IP-like entities
+    agent = DiscoveryAgent()
+    if agent._validate_target(entity):
+        try:
+            # Map evidence gap to attributes
+            attrs = ['reachability', 'hostname', 'open_ports']
+            if 'network' in gap.lower() or 'connect' in gap.lower():
+                attrs = ['reachability', 'latency', 'hop_count']
+            elif 'dns' in gap.lower() or 'hostname' in gap.lower():
+                attrs = ['hostname', 'reverse_dns', 'fqdn']
+            elif 'port' in gap.lower() or 'service' in gap.lower():
+                attrs = ['open_ports', 'listening_services']
+            
+            result = await agent.discover(targets=[entity], attributes=attrs, timeout=15)
+            if result.hosts:
+                host = result.hosts[0]
+                return [{
+                    'timestamp': datetime.now().isoformat(),
+                    'event_type': 'discovery_enrichment',
+                    'entity': entity,
+                    'risk_score': 0.3 if host.status == 'alive' else 0.6,
+                    'discovery_status': host.status,
+                    'attributes': host.attributes,
+                    'provenance': host.provenance,
+                }]
+        except Exception:
+            pass  # Fall through to stub
+    
+    # Fallback stub for non-IP entities
     return [
         {
             'timestamp': datetime.now().isoformat(),
             'event_type': 'collected',
-            'entity': query.get('entity', 'unknown'),
+            'entity': entity,
             'risk_score': 0.5
         }
     ]

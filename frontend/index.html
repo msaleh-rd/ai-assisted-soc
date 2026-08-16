@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI-Native SOC Platform</title>
-    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/styles.css?v=5">
 </head>
 <body>
     <!-- Sidebar -->
@@ -43,6 +43,13 @@
             </li>
             <li class="nav-item" data-page="incidents">
                 <span class="nav-icon">&#128196;</span> Incidents &amp; Reports
+            </li>
+            <li class="nav-section">Tools</li>
+            <li class="nav-item" data-page="discovery">
+                <span class="nav-icon">&#128752;</span> Network Discovery
+            </li>
+            <li class="nav-item" data-page="orchestrator">
+                <span class="nav-icon">&#129302;</span> Agent Orchestrator
             </li>
             <li class="nav-section">System</li>
             <li class="nav-item" data-page="demo">
@@ -487,6 +494,195 @@
             </div>
         </div>
 
+        <!-- Network Discovery -->
+        <div class="page" id="page-discovery">
+            <div class="page-header">
+                <h1>Network Discovery</h1>
+                <span class="badge badge-blue">Enrichment Tool</span>
+            </div>
+            <div class="grid-2">
+                <!-- Skill Catalog -->
+                <div class="panel">
+                    <h3>&#128268; Skill Catalog</h3>
+                    <p class="description">Pluggable discovery skills loaded from SKILL.md files.</p>
+                    <button class="btn btn-sm" onclick="loadSkillCatalog()">Reload Skills</button>
+                    <div id="skillCatalog" class="skill-catalog"></div>
+                </div>
+
+                <!-- Discovery Scan -->
+                <div class="panel">
+                    <h3>&#128752; Discovery Scan</h3>
+                    <div class="form-group">
+                        <label>Targets <span class="hint">(IPs or hostnames, one per line)</span></label>
+                        <textarea id="discoveryTargets" rows="4" class="code-input" placeholder="10.0.2.100&#10;192.168.1.42&#10;server01.corp.local"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>Attributes to Collect</label>
+                        <div class="checkbox-group" id="discoveryAttributes">
+                            <label><input type="checkbox" value="reachability" checked> Reachability</label>
+                            <label><input type="checkbox" value="latency" checked> Latency</label>
+                            <label><input type="checkbox" value="hostname" checked> Hostname / DNS</label>
+                            <label><input type="checkbox" value="open_ports" checked> Open Ports</label>
+                            <label><input type="checkbox" value="hop_count"> Hop Count</label>
+                            <label><input type="checkbox" value="os_name"> OS Info</label>
+                            <label><input type="checkbox" value="mac_address"> MAC Address</label>
+                            <label><input type="checkbox" value="organization"> WHOIS / Org</label>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Timeout (seconds)</label>
+                        <input type="number" id="discoveryTimeout" value="30" min="5" max="120">
+                    </div>
+                    <button class="btn btn-primary" onclick="runDiscoveryScan()" id="discoveryScanBtn">
+                        &#9654; Run Discovery Scan
+                    </button>
+                    <div id="discoveryScanStatus" class="result-box"></div>
+                </div>
+            </div>
+
+            <!-- Scan Results -->
+            <div class="panel" id="discoveryResultsPanel" style="display:none; margin-top: 1rem;">
+                <h3>&#128202; Scan Results</h3>
+                <div class="discovery-meta" id="discoveryMeta"></div>
+                <div id="discoveryHostResults"></div>
+            </div>
+
+            <!-- Quick Enrich -->
+            <div class="panel" style="margin-top: 1rem;">
+                <h3>&#128269; Quick Enrich</h3>
+                <p class="description">Enrich a single target with all available attributes.</p>
+                <div class="grid-3-inline">
+                    <input type="text" id="enrichTarget" placeholder="10.0.2.100">
+                    <button class="btn btn-sm btn-primary" onclick="enrichTarget()">Enrich</button>
+                </div>
+                <div id="enrichResult" class="result-box"></div>
+            </div>
+        </div>
+
+        <!-- Agent Orchestrator -->
+        <div class="page" id="page-orchestrator">
+            <div class="page-header">
+                <h1>Agent Orchestrator</h1>
+                <span class="badge badge-purple">Agentic AI</span>
+            </div>
+
+            <!-- Task Input -->
+            <div class="panel">
+                <h3>Investigation Task</h3>
+                <p class="description">Submit an alert and watch the orchestrator decompose it into sub-tasks, delegate to specialized agents, and synthesize findings — streamed live.</p>
+                <div class="form-group">
+                    <label>Alert Template</label>
+                    <select id="orchAlertTemplate" class="form-select" onchange="loadOrchTemplate()">
+                        <option value="crowdstrike_malware">CrowdStrike — Malware Execution</option>
+                        <option value="crowdstrike_lateral">CrowdStrike — Lateral Movement</option>
+                        <option value="splunk_bruteforce">Splunk — Brute Force Attack</option>
+                        <option value="splunk_exfil">Splunk — Data Exfiltration</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Task Description</label>
+                    <input type="text" id="orchTask" class="form-input" value="Investigate security alert and recommend response" />
+                </div>
+                <button class="btn btn-primary btn-wide" onclick="runOrchestration()" id="orchStartBtn">
+                    &#9654; Run Agentic Investigation
+                </button>
+            </div>
+
+            <!-- Orchestration Visualization -->
+            <div class="panel orch-panel" id="orchPanel" style="display:none;">
+                <!-- Plan Display -->
+                <div class="orch-plan" id="orchPlan">
+                    <div class="orch-plan-header">
+                        <span class="orch-status-badge" id="orchStatus">Planning...</span>
+                        <span class="orch-timer" id="orchTimer">0.0s</span>
+                    </div>
+                    <div class="orch-reasoning" id="orchReasoning"></div>
+                </div>
+
+                <!-- Agent DAG -->
+                <div class="orch-dag" id="orchDag">
+                    <div class="dag-phase" id="dagPhase1">
+                        <div class="phase-label">Phase 1</div>
+                        <div class="phase-agents">
+                            <div class="agent-node" id="node-triage_agent" data-agent="triage_agent">
+                                <div class="agent-icon">&#128269;</div>
+                                <div class="agent-label">Triage</div>
+                                <div class="agent-status-dot"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="dag-connector">&#8595;</div>
+                    <div class="dag-phase" id="dagPhase2">
+                        <div class="phase-label">Phase 2 <span class="parallel-badge">PARALLEL</span></div>
+                        <div class="phase-agents">
+                            <div class="agent-node" id="node-evidence_agent" data-agent="evidence_agent">
+                                <div class="agent-icon">&#128200;</div>
+                                <div class="agent-label">Evidence</div>
+                                <div class="agent-status-dot"></div>
+                            </div>
+                            <div class="agent-node" id="node-discovery_agent" data-agent="discovery_agent">
+                                <div class="agent-icon">&#127760;</div>
+                                <div class="agent-label">Discovery</div>
+                                <div class="agent-status-dot"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="dag-connector">&#8595;</div>
+                    <div class="dag-phase" id="dagPhase3">
+                        <div class="phase-label">Phase 3</div>
+                        <div class="phase-agents">
+                            <div class="agent-node" id="node-compression_agent" data-agent="compression_agent">
+                                <div class="agent-icon">&#128476;</div>
+                                <div class="agent-label">Compression</div>
+                                <div class="agent-status-dot"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="dag-connector">&#8595;</div>
+                    <div class="dag-phase" id="dagPhase4">
+                        <div class="phase-label">Phase 4</div>
+                        <div class="phase-agents">
+                            <div class="agent-node" id="node-rca_agent" data-agent="rca_agent">
+                                <div class="agent-icon">&#128300;</div>
+                                <div class="agent-label">RCA</div>
+                                <div class="agent-status-dot"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="dag-connector">&#8595;</div>
+                    <div class="dag-phase" id="dagPhase5">
+                        <div class="phase-label">Phase 5</div>
+                        <div class="phase-agents">
+                            <div class="agent-node" id="node-response_agent" data-agent="response_agent">
+                                <div class="agent-icon">&#9889;</div>
+                                <div class="agent-label">Response</div>
+                                <div class="agent-status-dot"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Live Event Log -->
+                <div class="orch-log-header">
+                    <h4>Live Agent Log</h4>
+                    <span class="log-count" id="orchLogCount">0 events</span>
+                </div>
+                <div class="orch-log" id="orchLog"></div>
+
+                <!-- Agent Reports (expandable) -->
+                <div class="orch-reports" id="orchReports">
+                    <h4>Agent Reports</h4>
+                    <div class="reports-grid" id="orchReportsGrid"></div>
+                </div>
+
+                <!-- Synthesis -->
+                <div class="orch-synthesis" id="orchSynthesis" style="display:none;">
+                    <h4>&#10003; Orchestrator Synthesis</h4>
+                    <div class="synthesis-content" id="orchSynthesisContent"></div>
+                </div>
+            </div>
+        </div>
+
         <!-- End-to-End Demo -->
         <div class="page" id="page-demo">
             <div class="page-header">
@@ -564,6 +760,6 @@
         </div>
     </main>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=5"></script>
 </body>
 </html>

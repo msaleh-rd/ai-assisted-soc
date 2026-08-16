@@ -2,7 +2,7 @@
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from datetime import datetime
 import os
@@ -40,7 +40,9 @@ async def serve_ui():
     """Serve the SOC Dashboard UI."""
     index_path = os.path.join(frontend_dir, 'index.html')
     if os.path.isfile(index_path):
-        return FileResponse(index_path)
+        with open(index_path, 'r', encoding='utf-8') as f:
+            html = f.read()
+        return HTMLResponse(html)
     return JSONResponse({"error": "Frontend not found"}, status_code=404)
 
 

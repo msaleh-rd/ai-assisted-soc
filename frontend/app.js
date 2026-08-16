@@ -474,6 +474,178 @@ async function viewReport() {
     showResult('viewReportResult', res.data, !res.ok);
 }
 
+// === Network Discovery ===
+
+async function loadSkillCatalog() {
+    const container = document.getElementById('skillCatalog');
+    container.innerHTML = '<div class="loading">Loading skills...</div>';
+    try {
+        const res = await apiFetch('/api/v3/discovery/skills');
+        if (!res.ok) {
+            container.innerHTML = '<div class="error-text">Failed to load skills</div>';
+            return;
+        }
+        const skills = res.data;
+        if (!skills.length) {
+            container.innerHTML = '<div class="empty-text">No skills found</div>';
+            return;
+        }
+        container.innerHTML = skills.map(s => `
+            <div class="skill-card">
+                <div class="skill-header">
+                    <span class="skill-name">${s.name}</span>
+                    <span class="badge badge-sm">${s.method}</span>
+                    ${s.platform ? `<span class="badge badge-sm badge-outline">${s.platform}</span>` : '<span class="badge badge-sm badge-green">cross-platform</span>'}
+                </div>
+                <div class="skill-desc">${s.description}</div>
+                <div class="skill-collects">
+                    <span class="skill-label">Collects:</span>
+                    ${s.collects.map(c => `<span class="attr-tag">${c}</span>`).join('')}
+                </div>
+            </div>
+        `).join('');
+    } catch (e) {
+        container.innerHTML = `<div class="error-text">Error: ${e.message}</div>`;
+    }
+}
+
+async function runDiscoveryScan() {
+    const btn = document.getElementById('discoveryScanBtn');
+    const statusEl = document.getElementById('discoveryScanStatus');
+    const targetsRaw = document.getElementById('discoveryTargets').value.trim();
+    const timeout = parseInt(document.getElementById('discoveryTimeout').value) || 30;
+
+    if (!targetsRaw) {
+        showResult('discoveryScanStatus', 'Enter at least one target IP or hostname', true);
+        return;
+    }
+
+    const targets = targetsRaw.split('\n').map(t => t.trim()).filter(Boolean);
+
+    // Collect checked attributes
+    const checkboxes = document.querySelectorAll('#discoveryAttributes input[type="checkbox"]:checked');
+    const attributes = Array.from(checkboxes).map(cb => cb.value);
+    if (!attributes.length) {
+        showResult('discoveryScanStatus', 'Select at least one attribute to collect', true);
+        return;
+    }
+
+    btn.disabled = true;
+    btn.innerHTML = '&#9203; Scanning...';
+    statusEl.className = 'result-box visible info';
+    statusEl.textContent = `Scanning ${targets.length} target(s) for ${attributes.length} attribute(s)...`;
+
+    try {
+        const res = await apiFetch('/api/v3/discovery/scan', {
+            method: 'POST',
+            body: JSON.stringify({ targets, attributes, timeout })
+        });
+
+        if (!res.ok) {
+            showResult('discoveryScanStatus', res.data, true);
+            btn.disabled = false;
+            btn.innerHTML = '&#9654; Run Discovery Scan';
+            return;
+        }
+
+        const data = res.data;
+        statusEl.className = 'result-box visible success';
+        statusEl.textContent = `Scan ${data.scan_id} complete in ${data.duration_seconds.toFixed(1)}s — ${data.skills_used.length} skill(s) used`;
+
+        // Show results panel
+        renderDiscoveryResults(data);
+    } catch (e) {
+        showResult('discoveryScanStatus', `Error: ${e.message}`, true);
+    }
+
+    btn.disabled = false;
+    btn.innerHTML = '&#9654; Run Discovery Scan';
+}
+
+function renderDiscoveryResults(data) {
+    const panel = document.getElementById('discoveryResultsPanel');
+    const meta = document.getElementById('discoveryMeta');
+    const hostsEl = document.getElementById('discoveryHostResults');
+
+    panel.style.display = 'block';
+
+    meta.innerHTML = `
+        <div class="discovery-stats">
+            <span class="disc-stat"><strong>Scan:</strong> ${data.scan_id}</span>
+            <span class="disc-stat"><strong>Skills:</strong> ${data.skills_used.join(', ') || 'none'}</span>
+            <span class="disc-stat"><strong>Duration:</strong> ${data.duration_seconds.toFixed(2)}s</span>
+        </div>
+    `;
+
+    hostsEl.innerHTML = data.hosts.map(host => {
+        const statusClass = host.status === 'alive' ? 'status-alive' :
+                           host.status === 'unreachable' ? 'status-unreachable' : 'status-unknown';
+        const statusIcon = host.status === 'alive' ? '&#9679;' :
+                          host.status === 'unreachable' ? '&#9675;' : '&#63;';
+
+        const attrRows = Object.entries(host.attributes).map(([key, val]) => {
+            const prov = host.provenance[key] || '';
+            const valClass = val === 'unavailable' ? 'attr-unavailable' : 'attr-value';
+            return `<tr>
+                <td class="attr-key">${key}</td>
+                <td class="${valClass}">${val}</td>
+                <td class="attr-provenance">${prov}</td>
+            </tr>`;
+        }).join('');
+
+        const errorHtml = host.errors && host.errors.length
+            ? `<div class="host-errors">${host.errors.map(e => `<div class="host-error">&#9888; ${e}</div>`).join('')}</div>`
+            : '';
+
+        return `
+            <div class="host-result-card">
+                <div class="host-header">
+                    <span class="host-target">${host.target}</span>
+                    <span class="host-status ${statusClass}">${statusIcon} ${host.status}</span>
+                </div>
+                <table class="attr-table">
+                    <thead><tr><th>Attribute</th><th>Value</th><th>Source</th></tr></thead>
+                    <tbody>${attrRows}</tbody>
+                </table>
+                ${errorHtml}
+            </div>
+        `;
+    }).join('');
+}
+
+async function enrichTarget() {
+    const target = document.getElementById('enrichTarget').value.trim();
+    if (!target) {
+        showResult('enrichResult', 'Enter a target IP or hostname', true);
+        return;
+    }
+    showInfo('enrichResult', `Enriching ${target}...`);
+    try {
+        const res = await apiFetch(`/api/v3/discovery/enrich/${encodeURIComponent(target)}`, { method: 'POST' });
+        if (!res.ok) {
+            showResult('enrichResult', res.data, true);
+            return;
+        }
+        const d = res.data;
+        let text = `Target: ${d.target}\nStatus: ${d.status}\nSkills Used: ${(d.skills_used || []).join(', ')}\n\nAttributes:\n`;
+        for (const [k, v] of Object.entries(d.attributes || {})) {
+            text += `  ${k}: ${v}  (via ${d.provenance[k] || '?'})\n`;
+        }
+        if (d.errors && d.errors.length) {
+            text += `\nErrors:\n${d.errors.map(e => '  ⚠ ' + e).join('\n')}`;
+        }
+        showResult('enrichResult', text);
+    } catch (e) {
+        showResult('enrichResult', `Error: ${e.message}`, true);
+    }
+}
+
+// Load skill catalog on page navigation
+document.querySelector('[data-page="discovery"]')?.addEventListener('click', () => {
+    // Auto-load skills when navigating to discovery page
+    setTimeout(loadSkillCatalog, 100);
+});
+
 // === End-to-End Demo ===
 let demoRunning = false;
 
@@ -617,3 +789,341 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }, 30000);
 });
+
+// === Agent Orchestrator ===
+const ORCH_TEMPLATES = {
+    crowdstrike_malware: {
+        source: 'crowdstrike',
+        severity_name: 'High',
+        severity: 4,
+        tactic: 'Execution',
+        technique_id: 'T1059.001',
+        alert: {
+            event_type: 'DetectionSummaryEvent',
+            severity: 4,
+            severity_name: 'High',
+            tactic: 'Execution',
+            technique_id: 'T1059.001',
+            user_name: 'jsmith',
+            computer_name: 'WS-FINANCE-042',
+            local_ip: '10.0.2.100',
+            file_name: 'payload.exe',
+            sha256: 'a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01',
+            command_line: 'cmd.exe /c powershell -ep bypass -f payload.ps1',
+        }
+    },
+    crowdstrike_lateral: {
+        source: 'crowdstrike',
+        severity_name: 'Critical',
+        severity: 5,
+        tactic: 'Lateral Movement',
+        technique_id: 'T1021.002',
+        alert: {
+            event_type: 'DetectionSummaryEvent',
+            severity: 5,
+            severity_name: 'Critical',
+            tactic: 'Lateral Movement',
+            technique_id: 'T1021.002',
+            user_name: 'admin_backup',
+            computer_name: 'DC-PRIMARY-01',
+            local_ip: '10.0.1.5',
+            file_name: 'psexec.exe',
+            sha256: 'deadbeef12345678deadbeef12345678deadbeef12345678deadbeef12345678',
+        }
+    },
+    splunk_bruteforce: {
+        source: 'splunk',
+        severity_name: 'High',
+        severity: 4,
+        tactic: 'Credential Access',
+        technique_id: 'T1110',
+        user: 'svc_monitoring',
+        hostname: 'AUTH-SERVER-01',
+        src_ip: '185.143.223.47',
+        alert: {
+            user_name: 'svc_monitoring',
+            computer_name: 'AUTH-SERVER-01',
+        }
+    },
+    splunk_exfil: {
+        source: 'splunk',
+        severity_name: 'Critical',
+        severity: 5,
+        tactic: 'Exfiltration',
+        technique_id: 'T1048',
+        user: 'dev_contractor',
+        hostname: 'DB-PROD-03',
+        src_ip: '10.0.5.88',
+        domain: 'exfil-drop.darkweb.cc',
+        alert: {
+            user_name: 'dev_contractor',
+            computer_name: 'DB-PROD-03',
+            local_ip: '10.0.5.88',
+        }
+    },
+};
+
+let orchRunning = false;
+let orchTimerInterval = null;
+let orchStartTime = null;
+let orchEventCount = 0;
+
+function loadOrchTemplate() {
+    // No-op, template selection is used at run time
+}
+
+async function runOrchestration() {
+    if (orchRunning) return;
+    orchRunning = true;
+
+    const btn = document.getElementById('orchStartBtn');
+    btn.disabled = true;
+    btn.textContent = '⟳ Orchestrating...';
+
+    const panel = document.getElementById('orchPanel');
+    panel.style.display = 'block';
+
+    // Reset UI
+    resetOrchUI();
+
+    const templateKey = document.getElementById('orchAlertTemplate').value;
+    const task = document.getElementById('orchTask').value || 'Investigate security alert';
+    const alertData = ORCH_TEMPLATES[templateKey];
+
+    // Start timer
+    orchStartTime = Date.now();
+    orchTimerInterval = setInterval(updateOrchTimer, 100);
+
+    try {
+        const response = await fetch('/api/v3/orchestrator/investigate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task, alert_data: alertData }),
+        });
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop(); // Keep incomplete line in buffer
+
+            let eventType = '';
+            for (const line of lines) {
+                if (line.startsWith('event: ')) {
+                    eventType = line.slice(7).trim();
+                } else if (line.startsWith('data: ') && eventType) {
+                    try {
+                        const data = JSON.parse(line.slice(6));
+                        handleOrchEvent(eventType, data);
+                    } catch (e) { /* skip malformed */ }
+                    eventType = '';
+                }
+            }
+        }
+    } catch (e) {
+        addOrchLog('error', 'orchestrator', `Error: ${e.message}`);
+        setOrchStatus('failed');
+    }
+
+    clearInterval(orchTimerInterval);
+    btn.disabled = false;
+    btn.textContent = '▶ Run Agentic Investigation';
+    orchRunning = false;
+}
+
+function resetOrchUI() {
+    orchEventCount = 0;
+    document.getElementById('orchLog').innerHTML = '';
+    document.getElementById('orchReportsGrid').innerHTML = '';
+    document.getElementById('orchReasoning').textContent = '';
+    document.getElementById('orchSynthesis').style.display = 'none';
+    document.getElementById('orchLogCount').textContent = '0 events';
+    setOrchStatus('planning');
+
+    // Reset all agent nodes
+    document.querySelectorAll('.agent-node').forEach(node => {
+        node.className = 'agent-node pending';
+    });
+}
+
+function handleOrchEvent(type, data) {
+    orchEventCount++;
+    document.getElementById('orchLogCount').textContent = `${orchEventCount} events`;
+
+    switch (type) {
+        case 'run_start':
+            setOrchStatus('planning');
+            addOrchLog(type, 'orchestrator', `Starting investigation: "${data.task}"`);
+            break;
+
+        case 'plan_created':
+            setOrchStatus('running');
+            document.getElementById('orchReasoning').textContent = data.reasoning;
+            addOrchLog(type, 'orchestrator', `Plan created: ${data.total_tasks} tasks across ${data.total_phases} phases`);
+            break;
+
+        case 'phase_start':
+            const parallelNote = data.parallel ? ' [PARALLEL]' : '';
+            addOrchLog(type, 'orchestrator', `Phase ${data.phase_num} starting${parallelNote}: ${data.agents.join(', ')}`);
+            break;
+
+        case 'agent_start':
+            setAgentNodeState(data.agent_name, 'running');
+            addOrchLog(type, data.agent_name, `Started: ${data.description}`);
+            break;
+
+        case 'agent_complete':
+            const report = data.report;
+            const state = report.status === 'completed' ? 'completed' : 'failed';
+            setAgentNodeState(data.agent_name, state);
+            const summary = report.findings?.summary || report.findings?.initial_assessment || `Done in ${report.duration_ms}ms`;
+            addOrchLog(type, data.agent_name, `Completed (${report.duration_ms}ms) — ${summary}`);
+            addAgentReport(report);
+            break;
+
+        case 'phase_complete':
+            addOrchLog(type, 'orchestrator', `Phase ${data.phase_num} complete`);
+            break;
+
+        case 'synthesis_start':
+            addOrchLog(type, 'orchestrator', 'Synthesizing findings from all agents...');
+            break;
+
+        case 'run_complete':
+            setOrchStatus('completed');
+            addOrchLog(type, 'orchestrator', `Investigation complete (${data.total_duration_ms}ms)`);
+            renderSynthesis(data.synthesis, data.total_duration_ms);
+            break;
+    }
+}
+
+function setOrchStatus(status) {
+    const badge = document.getElementById('orchStatus');
+    badge.className = `orch-status-badge ${status}`;
+    const labels = { planning: 'Planning...', running: 'Executing', completed: 'Completed', failed: 'Failed' };
+    badge.textContent = labels[status] || status;
+}
+
+function setAgentNodeState(agentName, state) {
+    const node = document.getElementById(`node-${agentName}`);
+    if (node) node.className = `agent-node ${state}`;
+}
+
+function updateOrchTimer() {
+    if (!orchStartTime) return;
+    const elapsed = ((Date.now() - orchStartTime) / 1000).toFixed(1);
+    document.getElementById('orchTimer').textContent = `${elapsed}s`;
+}
+
+function addOrchLog(eventType, agent, message) {
+    const log = document.getElementById('orchLog');
+    const elapsed = orchStartTime ? ((Date.now() - orchStartTime) / 1000).toFixed(2) : '0.00';
+
+    const entry = document.createElement('div');
+    entry.className = `log-entry event-${eventType}`;
+    entry.innerHTML = `<span class="log-time">${elapsed}s</span><span class="log-agent">${formatAgentName(agent)}</span><span class="log-msg">${escapeHtml(message)}</span>`;
+    log.appendChild(entry);
+    log.scrollTop = log.scrollHeight;
+}
+
+function addAgentReport(report) {
+    const grid = document.getElementById('orchReportsGrid');
+    const confidence = report.confidence || 0;
+    const confClass = confidence >= 0.8 ? 'confidence-high' : confidence >= 0.5 ? 'confidence-medium' : 'confidence-low';
+
+    // Pick key findings to display (skip large objects)
+    const findings = report.findings || {};
+    const displayFindings = Object.entries(findings)
+        .filter(([k, v]) => typeof v !== 'object' || Array.isArray(v))
+        .filter(([k]) => k !== 'summary' && k !== 'initial_assessment')
+        .slice(0, 6);
+
+    const artifactsHtml = (report.artifacts || [])
+        .map(a => `<span class="artifact-tag">${a}</span>`).join('');
+
+    const findingsHtml = displayFindings
+        .map(([k, v]) => {
+            const val = Array.isArray(v) ? `[${v.length} items]` : String(v);
+            return `<div class="report-finding-item"><span class="report-finding-key">${k}:</span><span class="report-finding-value">${escapeHtml(val)}</span></div>`;
+        }).join('');
+
+    const card = document.createElement('div');
+    card.className = 'report-card';
+    card.innerHTML = `
+        <div class="report-card-header">
+            <span class="report-agent-name">${formatAgentName(report.agent_name)}</span>
+            <span class="report-duration">${report.duration_ms}ms</span>
+        </div>
+        <div class="report-task">${escapeHtml(report.task)}</div>
+        <span class="report-confidence ${confClass}">${(confidence * 100).toFixed(0)}% confidence</span>
+        <div class="report-findings">${findingsHtml}</div>
+        <div class="report-artifacts">${artifactsHtml}</div>
+    `;
+    grid.appendChild(card);
+}
+
+function renderSynthesis(synthesis, totalMs) {
+    const el = document.getElementById('orchSynthesis');
+    const content = document.getElementById('orchSynthesisContent');
+    el.style.display = 'block';
+
+    content.innerHTML = `
+        <div class="synthesis-verdict">${escapeHtml(synthesis.verdict)}</div>
+        <p style="color:var(--text-secondary);font-size:0.88rem;margin-bottom:1rem;">${escapeHtml(synthesis.executive_summary)}</p>
+        <div class="synthesis-stats">
+            <div class="synthesis-stat">
+                <div class="synthesis-stat-value">${synthesis.severity}</div>
+                <div class="synthesis-stat-label">Severity</div>
+            </div>
+            <div class="synthesis-stat">
+                <div class="synthesis-stat-value">${(synthesis.confidence * 100).toFixed(0)}%</div>
+                <div class="synthesis-stat-label">Confidence</div>
+            </div>
+            <div class="synthesis-stat">
+                <div class="synthesis-stat-value">${synthesis.blast_radius}</div>
+                <div class="synthesis-stat-label">Blast Radius</div>
+            </div>
+            <div class="synthesis-stat">
+                <div class="synthesis-stat-value">${synthesis.compression_ratio}</div>
+                <div class="synthesis-stat-label">Compression</div>
+            </div>
+            <div class="synthesis-stat">
+                <div class="synthesis-stat-value">${synthesis.response_actions}</div>
+                <div class="synthesis-stat-label">Actions</div>
+            </div>
+            <div class="synthesis-stat">
+                <div class="synthesis-stat-value">${synthesis.agents_used}</div>
+                <div class="synthesis-stat-label">Agents Used</div>
+            </div>
+            <div class="synthesis-stat">
+                <div class="synthesis-stat-value">${(totalMs / 1000).toFixed(1)}s</div>
+                <div class="synthesis-stat-label">Total Time</div>
+            </div>
+        </div>
+    `;
+}
+
+function formatAgentName(name) {
+    const names = {
+        orchestrator: '🎯 Orchestrator',
+        triage_agent: '🔍 Triage',
+        evidence_agent: '📊 Evidence',
+        discovery_agent: '🌐 Discovery',
+        compression_agent: '🗜️ Compression',
+        rca_agent: '🔬 RCA',
+        response_agent: '⚡ Response',
+    };
+    return names[name] || name;
+}
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = String(str);
+    return div.innerHTML;
+}
