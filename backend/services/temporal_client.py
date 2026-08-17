@@ -74,7 +74,16 @@ async def get_investigation_status(workflow_id: str) -> Dict[str, Any]:
         return progress
     except Exception as e:
         logger.warning("Failed to query workflow %s: %s", workflow_id, e)
-        # If the workflow completed, try to get the result instead
+        # If the workflow is still running, do not await result because it will block indefinitely.
+        try:
+            from temporalio.client import WorkflowExecutionStatus
+            desc = await handle.describe()
+            if desc.status == WorkflowExecutionStatus.RUNNING:
+                return {"status": "unknown", "error": str(e)}
+        except Exception:
+            pass
+            
+        # If the workflow completed (or we couldn't check), try to get the result instead
         try:
             result = await handle.result()
             return {
