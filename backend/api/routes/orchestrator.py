@@ -146,6 +146,7 @@ async def stream_investigation(workflow_id: str):
     async def sse_poll():
         last_phase = 0
         last_reports = set()
+        last_iteration = 0
 
         while True:
             progress = await get_investigation_status(workflow_id)
@@ -167,6 +168,18 @@ async def stream_investigation(workflow_id: str):
                     "agents": phase_info.get("agents", []),
                 })
                 last_phase = current_phase
+                
+            iteration = progress.get("iteration", 0)
+            if iteration > last_iteration:
+                confidence_history = progress.get("confidence_history", [])
+                last_confidence = confidence_history[-1] if confidence_history else 0.0
+                yield _sse("adaptive_loop_start", {
+                    "workflow_id": workflow_id,
+                    "iteration": iteration,
+                    "confidence": last_confidence,
+                    "reason": "Re-investigating based on findings",
+                })
+                last_iteration = iteration
 
             # Emit events for newly completed agent reports
             for task_id, report in completed_reports.items():
@@ -233,6 +246,54 @@ async def list_investigations():
     from backend.services.temporal_client import list_investigations as fetch_list
     investigations = await fetch_list(limit=50)
     return {"investigations": investigations, "count": len(investigations)}
+
+@router.get("/approvals/pending")
+async def list_pending_approvals():
+    """
+    List all investigations that are currently waiting for human approval.
+    """
+    if not USE_TEMPORAL:
+        return {"pending_approvals": []}
+        
+    try:
+        from temporalio.client import Client
+        import os
+        from backend.services.temporal_client import get_investigation_status
+        temporal_host = os.getenv("TEMPORAL_HOST", "127.0.0.1:7233")
+        client = await Client.connect(temporal_host)
+        
+        pending = []
+        async for workflow_exec in client.list_workflows(
+            query='WorkflowType = "InvestigationWorkflow" and ExecutionStatus = "Running"',
+            limit=50,
+        ):
+            progress = await get_investigation_status(workflow_exec.id)
+            if progress.get("status") == "pending_approval":
+                reports = progress.get("completed_reports", {})
+                
+                # Get recommended actions from Response agent
+                response_report = reports.get("task-response", {})
+                actions = response_report.get("findings", {}).get("actions_recommended", [])
+                
+                # Get entities from Triage agent
+                triage_report = reports.get("task-triage", {})
+                entities = triage_report.get("findings", {}).get("entities_identified", [])
+                
+                synthesis = progress.get("synthesis", {})
+                
+                pending.append({
+                    "workflow_id": workflow_exec.id,
+                    "actions": actions,
+                    "confidence": response_report.get("findings", {}).get("confidence", 0.90),
+                    "entities": entities,
+                    "summary": synthesis.get("executive_summary", "Approval required for response actions.")
+                })
+                
+        return {"pending_approvals": pending}
+    except Exception as e:
+        logger.error(f"Failed to list pending approvals: {e}")
+        return {"pending_approvals": []}
+
 
 from pydantic import BaseModel
 class ApprovalDecision(BaseModel):

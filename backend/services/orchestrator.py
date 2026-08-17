@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, AsyncGenerator, Dict, List, Optional
+from backend.services.investigation_context import InvestigationContext
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +103,7 @@ class BaseAgent:
     name: str = "base"
     description: str = ""
 
-    async def execute(self, inputs: Dict[str, Any], context: Dict[str, Any]) -> AgentReport:
+    async def execute(self, inputs: Dict[str, Any], context: InvestigationContext) -> AgentReport:
         raise NotImplementedError
 
 
@@ -112,9 +113,9 @@ class TriageAgent(BaseAgent):
     name = "triage_agent"
     description = "Alert triage and classification"
 
-    async def execute(self, inputs: Dict[str, Any], context: Dict[str, Any]) -> AgentReport:
+    async def execute(self, inputs: Dict[str, Any], context: InvestigationContext) -> AgentReport:
         start = time.time()
-        alert = inputs.get("alert", {})
+        alert = context.alert_data
 
         from backend.services.llm_client import get_llm, TriageOutput
         from backend.services.prompt_manager import prompt_manager
@@ -133,6 +134,11 @@ class TriageAgent(BaseAgent):
             findings["entity_count"] = len(findings.get("entities_identified", []))
             findings["prompt_version"] = prompt_manager.get_prompt_metadata("triage")["version"]
             confidence = 0.95
+            
+            # Update context
+            context.entities = findings.get("entities_identified", [])
+            context.classification = findings.get("classification", "unknown")
+            context.severity = findings.get("severity", "unknown")
         except Exception as e:
             # Fallback if LLM fails
             findings = {"error": str(e), "requires_immediate_action": True, "severity": "High"}
@@ -157,43 +163,62 @@ class EvidenceAgent(BaseAgent):
     name = "evidence_agent"
     description = "Evidence collection and entity expansion"
 
-    async def execute(self, inputs: Dict[str, Any], context: Dict[str, Any]) -> AgentReport:
+    async def execute(self, inputs: Dict[str, Any], context: InvestigationContext) -> AgentReport:
         start = time.time()
-        entities = inputs.get("entities", [])
+        entities = context.entities
 
         from backend.services.evidence_collection import EvidenceCollectionOrchestrator
         orchestrator = EvidenceCollectionOrchestrator()
 
         await asyncio.sleep(0.4)
 
+        # Check for specific evidence requests from other agents
+        pending_requests = context.get_pending_messages(self.name)
+        targeted_entities = []
+        for msg in pending_requests:
+            if msg.msg_type == "REQUEST_EVIDENCE":
+                targeted_entities.extend(msg.payload.get("entities", []))
+        
         # Build entity graph from identified entities
-        entity_graph = {}
-        relationships = []
-        for ent in entities:
-            eid = f"{ent['type']}:{ent['id']}"
-            entity_graph[eid] = {
-                "type": ent["type"],
-                "id": ent["id"],
-                "risk_score": 0.7 if ent["type"] in ("file", "ip") else 0.4,
-                "evidence_count": 3,
-            }
+        entity_graph = dict(context.entity_graph) if context.entity_graph else {}
+        relationships = list(context.relationships) if context.relationships else []
+        
+        # Mark pending requests as resolved
+        context.resolve_messages(pending_requests)
+
+        for ent in entities + targeted_entities:
+            # Handle string vs dict based on how it's passed
+            if isinstance(ent, str):
+                ent = {"type": "unknown", "id": ent}
+            eid = f"{ent.get('type', 'unknown')}:{ent.get('id', 'unknown')}"
+            if eid not in entity_graph:
+                entity_graph[eid] = {
+                    "type": ent.get("type", "unknown"),
+                    "id": ent.get("id", "unknown"),
+                    "risk_score": 0.7 if ent.get("type") in ("file", "ip") else 0.4,
+                    "evidence_count": 3,
+                }
             # Create relationships between entities
-            if ent["type"] == "process" and any(e["type"] == "host" for e in entities):
-                host = next((e for e in entities if e["type"] == "host"), None)
+            if ent.get("type") == "process" and any(e.get("type") == "host" for e in entities):
+                host = next((e for e in entities if e.get("type") == "host"), None)
                 if host:
                     relationships.append({
                         "source": eid,
                         "target": f"host:{host['id']}",
                         "type": "runs_on"
                     })
-            if ent["type"] == "user" and any(e["type"] == "host" for e in entities):
-                host = next((e for e in entities if e["type"] == "host"), None)
+            if ent.get("type") == "user" and any(e.get("type") == "host" for e in entities):
+                host = next((e for e in entities if e.get("type") == "host"), None)
                 if host:
                     relationships.append({
                         "source": eid,
                         "target": f"host:{host['id']}",
                         "type": "logged_into"
                     })
+                    
+        # Update context
+        context.entity_graph = entity_graph
+        context.relationships = relationships
 
         return AgentReport(
             agent_name=self.name,
@@ -222,15 +247,15 @@ class NetworkDiscoveryAgent(BaseAgent):
     name = "discovery_agent"
     description = "Network discovery and reconnaissance"
 
-    async def execute(self, inputs: Dict[str, Any], context: Dict[str, Any]) -> AgentReport:
+    async def execute(self, inputs: Dict[str, Any], context: InvestigationContext) -> AgentReport:
         start = time.time()
-        entities = inputs.get("entities", [])
+        entities = context.entities
 
         # Extract IP targets
-        ip_targets = [e["id"] for e in entities if e["type"] == "ip"]
+        ip_targets = [e.get("id") for e in entities if isinstance(e, dict) and e.get("type") == "ip"]
         # Also check hosts that look like IPs
         for e in entities:
-            if e["type"] == "host" and any(c.isdigit() for c in e["id"]):
+            if isinstance(e, dict) and e.get("type") == "host" and any(c.isdigit() for c in str(e.get("id", ""))):
                 ip_targets.append(e["id"])
 
         if not ip_targets:
@@ -289,9 +314,9 @@ class CompressionAgent(BaseAgent):
     name = "compression_agent"
     description = "Event compression and noise reduction"
 
-    async def execute(self, inputs: Dict[str, Any], context: Dict[str, Any]) -> AgentReport:
+    async def execute(self, inputs: Dict[str, Any], context: InvestigationContext) -> AgentReport:
         start = time.time()
-        entity_count = inputs.get("entity_count", 0)
+        entity_count = len(context.entity_graph) if context.entity_graph else 5
 
         await asyncio.sleep(0.5)
 
@@ -308,6 +333,13 @@ class CompressionAgent(BaseAgent):
         ]
         final_count = stages[-1]["output"]
         ratio = original_events / max(final_count, 1)
+        
+        # Update context
+        context.compressed_events = {
+            "original_events": original_events,
+            "compressed_events": final_count,
+            "stages": stages
+        }
 
         return AgentReport(
             agent_name=self.name,
@@ -334,10 +366,10 @@ class RCAAnalystAgent(BaseAgent):
     name = "rca_agent"
     description = "Root cause analysis and attack chain reconstruction"
 
-    async def execute(self, inputs: Dict[str, Any], context: Dict[str, Any]) -> AgentReport:
+    async def execute(self, inputs: Dict[str, Any], context: InvestigationContext) -> AgentReport:
         start = time.time()
-        entity_graph = inputs.get("entity_graph", {})
-        classification = inputs.get("classification", "unknown")
+        entity_graph = context.entity_graph
+        classification = context.classification
 
         from backend.services.llm_client import get_llm, RCAOutput
         from backend.services.prompt_manager import prompt_manager
@@ -356,9 +388,33 @@ class RCAAnalystAgent(BaseAgent):
             confidence = findings.get("confidence", 0.85)
             findings["prompt_version"] = prompt_manager.get_prompt_metadata("rca")["version"]
             findings["summary"] = f"Root cause identified: {findings.get('root_cause')}. Attack chain: {len(findings.get('attack_phases', []))} phases. Blast radius: {findings.get('blast_radius')} entities."
+            
+            # Post messages if confidence is low
+            if confidence < 0.7:
+                context.post_message(
+                    msg_type="LOW_CONFIDENCE",
+                    source=self.name,
+                    target="*",
+                    payload={"confidence": confidence, "reason": "Insufficient evidence to determine full attack chain"}
+                )
+                
+                # If we suspect there are missing entities, we can request evidence
+                if "unknown" in str(findings).lower():
+                    context.post_message(
+                        msg_type="REQUEST_EVIDENCE",
+                        source=self.name,
+                        target="evidence_agent",
+                        payload={"reason": "Missing origin of lateral movement"}
+                    )
+            
+            context.rca_findings = findings
+            context.rca_findings["confidence_score"] = confidence
+            
         except Exception as e:
             findings = {"error": str(e), "root_cause": "Unknown due to LLM error", "attack_phases": [], "blast_radius": 0, "summary": str(e)}
             confidence = 0.0
+            context.rca_findings = findings
+            context.rca_findings["confidence_score"] = confidence
 
         return AgentReport(
             agent_name=self.name,
@@ -379,11 +435,11 @@ class ResponsePlannerAgent(BaseAgent):
     name = "response_agent"
     description = "Response planning and action recommendation"
 
-    async def execute(self, inputs: Dict[str, Any], context: Dict[str, Any]) -> AgentReport:
+    async def execute(self, inputs: Dict[str, Any], context: InvestigationContext) -> AgentReport:
         start = time.time()
-        root_cause = inputs.get("root_cause", "")
-        attack_chain = inputs.get("attack_chain", [])
-        entities = inputs.get("entities", [])
+        root_cause = context.rca_findings.get("root_cause", "")
+        attack_chain = context.rca_findings.get("attack_chain", [])
+        entities = context.entities
 
         from backend.services.llm_client import get_llm, ResponseOutput
         from backend.services.prompt_manager import prompt_manager
@@ -391,7 +447,16 @@ class ResponsePlannerAgent(BaseAgent):
         import json
 
         # Need classification for section-aware playbook filtering
-        classification = inputs.get("classification", "unknown")
+        classification = context.classification
+
+        # Check if we should challenge the findings
+        if context.rca_findings.get("confidence_score", 1.0) < 0.5:
+            context.post_message(
+                msg_type="CHALLENGE",
+                source=self.name,
+                target="rca_agent",
+                payload={"reason": "Cannot generate safe response plan based on very low confidence RCA."}
+            )
 
         # 1. RAG Step: Retrieve playbook using section-aware search
         try:
@@ -475,7 +540,6 @@ class OrchestratorAgent:
             id="task-triage",
             agent_name="triage_agent",
             description="Analyze alert severity, classify threat, identify entities",
-            inputs={"alert": alert_data},
         )
 
         # Phase 2: Evidence + Discovery (parallel, depends on triage)
@@ -540,6 +604,8 @@ class OrchestratorAgent:
         """Execute the plan and yield SSE events for each step."""
         run_id = f"run-{uuid.uuid4().hex[:8]}"
         run_start = time.time()
+        
+        context = InvestigationContext(alert_data=alert_data)
 
         # --- PLANNING PHASE ---
         yield sse_event("run_start", {
@@ -580,90 +646,88 @@ class OrchestratorAgent:
 
         # --- EXECUTION PHASE ---
         all_reports: Dict[str, AgentReport] = {}
-        context: Dict[str, Any] = {"alert": alert_data}
+        
+        # Execute Phase 1 (Triage)
+        phase_num = 1
+        task_def = plan.phases[0][0]
+        yield sse_event("phase_start", {"run_id": run_id, "phase_num": phase_num, "parallel": False, "agents": [task_def.agent_name]})
+        yield sse_event("agent_start", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "description": task_def.description, "parallel": False, "timestamp": datetime.now().isoformat()})
+        report = await self.agents[task_def.agent_name].execute({}, context)
+        all_reports[task_def.id] = report
+        yield sse_event("agent_complete", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "report": report.to_dict()})
+        yield sse_event("phase_complete", {"run_id": run_id, "phase_num": phase_num})
 
-        for phase_idx, phase_tasks in enumerate(plan.phases):
-            phase_num = phase_idx + 1
-            is_parallel = len(phase_tasks) > 1
-
-            yield sse_event("phase_start", {
-                "run_id": run_id,
-                "phase_num": phase_num,
-                "parallel": is_parallel,
-                "agents": [t.agent_name for t in phase_tasks],
-            })
-
-            # Resolve inputs from previous reports
-            for task_def in phase_tasks:
-                task_def.inputs = self._resolve_inputs(task_def, all_reports, alert_data)
-
-            # Emit agent_start for each task
-            for task_def in phase_tasks:
-                yield sse_event("agent_start", {
-                    "run_id": run_id,
-                    "phase_num": phase_num,
-                    "agent_name": task_def.agent_name,
-                    "task_id": task_def.id,
-                    "description": task_def.description,
-                    "parallel": is_parallel,
-                    "timestamp": datetime.now().isoformat(),
-                })
-
-            # Execute (parallel or serial)
-            if is_parallel:
-                coros = []
-                for task_def in phase_tasks:
-                    agent = self.agents[task_def.agent_name]
-                    coros.append(agent.execute(task_def.inputs, context))
-                results = await asyncio.gather(*coros, return_exceptions=True)
-
-                for task_def, result in zip(phase_tasks, results):
-                    if isinstance(result, Exception):
-                        report = AgentReport(
-                            agent_name=task_def.agent_name,
-                            task=task_def.description,
-                            status=AgentStatus.FAILED,
-                            error=str(result),
-                        )
-                    else:
-                        report = result
-                    all_reports[task_def.id] = report
-                    task_def.report = report
-
-                    yield sse_event("agent_complete", {
-                        "run_id": run_id,
-                        "phase_num": phase_num,
-                        "agent_name": task_def.agent_name,
-                        "task_id": task_def.id,
-                        "report": report.to_dict(),
-                    })
-            else:
-                task_def = phase_tasks[0]
+        # Adaptive Loop for Evidence -> Compression -> RCA
+        looping = True
+        while looping:
+            context.confidence_history.append(context.rca_findings.get("confidence_score", 0.0))
+            
+            # Execute Phase 2 (Evidence & Discovery)
+            phase_num = 2
+            is_parallel = True
+            yield sse_event("phase_start", {"run_id": run_id, "phase_num": phase_num, "parallel": is_parallel, "agents": [t.agent_name for t in plan.phases[1]]})
+            coros = []
+            for task_def in plan.phases[1]:
+                yield sse_event("agent_start", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "description": task_def.description, "parallel": is_parallel, "timestamp": datetime.now().isoformat()})
                 agent = self.agents[task_def.agent_name]
-                try:
-                    report = await agent.execute(task_def.inputs, context)
-                except Exception as e:
-                    report = AgentReport(
-                        agent_name=task_def.agent_name,
-                        task=task_def.description,
-                        status=AgentStatus.FAILED,
-                        error=str(e),
-                    )
+                coros.append(agent.execute({}, context))
+            results = await asyncio.gather(*coros, return_exceptions=True)
+            for task_def, result in zip(plan.phases[1], results):
+                report = result if not isinstance(result, Exception) else AgentReport(agent_name=task_def.agent_name, task=task_def.description, status=AgentStatus.FAILED, error=str(result))
                 all_reports[task_def.id] = report
-                task_def.report = report
+                yield sse_event("agent_complete", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "report": report.to_dict()})
+            yield sse_event("phase_complete", {"run_id": run_id, "phase_num": phase_num})
 
-                yield sse_event("agent_complete", {
+            # Execute Phase 3 (Compression)
+            phase_num = 3
+            task_def = plan.phases[2][0]
+            yield sse_event("phase_start", {"run_id": run_id, "phase_num": phase_num, "parallel": False, "agents": [task_def.agent_name]})
+            yield sse_event("agent_start", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "description": task_def.description, "parallel": False, "timestamp": datetime.now().isoformat()})
+            try:
+                report = await self.agents[task_def.agent_name].execute({}, context)
+            except Exception as e:
+                report = AgentReport(agent_name=task_def.agent_name, task=task_def.description, status=AgentStatus.FAILED, error=str(e))
+            all_reports[task_def.id] = report
+            yield sse_event("agent_complete", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "report": report.to_dict()})
+            yield sse_event("phase_complete", {"run_id": run_id, "phase_num": phase_num})
+            
+            # Execute Phase 4 (RCA)
+            phase_num = 4
+            task_def = plan.phases[3][0]
+            yield sse_event("phase_start", {"run_id": run_id, "phase_num": phase_num, "parallel": False, "agents": [task_def.agent_name]})
+            yield sse_event("agent_start", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "description": task_def.description, "parallel": False, "timestamp": datetime.now().isoformat()})
+            try:
+                report = await self.agents[task_def.agent_name].execute({}, context)
+            except Exception as e:
+                report = AgentReport(agent_name=task_def.agent_name, task=task_def.description, status=AgentStatus.FAILED, error=str(e))
+            all_reports[task_def.id] = report
+            yield sse_event("agent_complete", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "report": report.to_dict()})
+            yield sse_event("phase_complete", {"run_id": run_id, "phase_num": phase_num})
+            
+            # Adaptive Loop Check
+            if context.needs_reinvestigation():
+                context.iteration += 1
+                yield sse_event("adaptive_loop_start", {
                     "run_id": run_id,
-                    "phase_num": phase_num,
-                    "agent_name": task_def.agent_name,
-                    "task_id": task_def.id,
-                    "report": report.to_dict(),
+                    "iteration": context.iteration,
+                    "confidence": context.rca_findings.get("confidence_score", 0.0),
+                    "reason": "RCA confidence low or pending evidence requests, re-investigating..."
                 })
+            else:
+                looping = False
 
-            yield sse_event("phase_complete", {
-                "run_id": run_id,
-                "phase_num": phase_num,
-            })
+        # Phase 5: Response
+        phase_num = 5
+        task_def = plan.phases[4][0]
+        yield sse_event("phase_start", {"run_id": run_id, "phase_num": phase_num, "parallel": False, "agents": [task_def.agent_name]})
+        yield sse_event("agent_start", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "description": task_def.description, "parallel": False, "timestamp": datetime.now().isoformat()})
+        try:
+            report = await self.agents[task_def.agent_name].execute({}, context)
+        except Exception as e:
+            report = AgentReport(agent_name=task_def.agent_name, task=task_def.description, status=AgentStatus.FAILED, error=str(e))
+        all_reports[task_def.id] = report
+        yield sse_event("agent_complete", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "report": report.to_dict()})
+        yield sse_event("phase_complete", {"run_id": run_id, "phase_num": phase_num})
 
         # --- SYNTHESIS PHASE ---
         yield sse_event("synthesis_start", {
@@ -673,7 +737,7 @@ class OrchestratorAgent:
 
         await asyncio.sleep(0.3)
 
-        synthesis = self._synthesize(all_reports, plan)
+        synthesis = self._synthesize(all_reports, plan, context)
 
         total_duration = int((time.time() - run_start) * 1000)
 
@@ -685,49 +749,7 @@ class OrchestratorAgent:
             "timestamp": datetime.now().isoformat(),
         })
 
-    def _resolve_inputs(self, task_def: SubTask, reports: Dict[str, AgentReport], alert_data: Dict) -> Dict[str, Any]:
-        """Resolve task inputs from previous agent reports."""
-        inputs = dict(task_def.inputs)
-
-        if task_def.agent_name == "triage_agent":
-            inputs["alert"] = alert_data
-
-        elif task_def.agent_name == "evidence_agent":
-            triage_report = reports.get("task-triage")
-            if triage_report:
-                inputs["entities"] = triage_report.findings.get("entities_identified", [])
-
-        elif task_def.agent_name == "discovery_agent":
-            triage_report = reports.get("task-triage")
-            if triage_report:
-                inputs["entities"] = triage_report.findings.get("entities_identified", [])
-
-        elif task_def.agent_name == "compression_agent":
-            evidence_report = reports.get("task-evidence")
-            if evidence_report:
-                inputs["entity_count"] = evidence_report.findings.get("entity_graph_size", 5)
-
-        elif task_def.agent_name == "rca_agent":
-            evidence_report = reports.get("task-evidence")
-            triage_report = reports.get("task-triage")
-            if evidence_report:
-                inputs["entity_graph"] = evidence_report.findings.get("entity_graph", {})
-            if triage_report:
-                inputs["classification"] = triage_report.findings.get("classification", "unknown")
-
-        elif task_def.agent_name == "response_agent":
-            rca_report = reports.get("task-rca")
-            triage_report = reports.get("task-triage")
-            if rca_report:
-                inputs["root_cause"] = rca_report.findings.get("root_cause", "")
-                inputs["attack_chain"] = rca_report.findings.get("attack_chain", [])
-            if triage_report:
-                inputs["entities"] = triage_report.findings.get("entities_identified", [])
-                inputs["classification"] = triage_report.findings.get("classification", "unknown")
-
-        return inputs
-
-    def _synthesize(self, reports: Dict[str, AgentReport], plan: ExecutionPlan) -> Dict[str, Any]:
+    def _synthesize(self, reports: Dict[str, AgentReport], plan: ExecutionPlan, context: InvestigationContext = None) -> Dict[str, Any]:
         """Synthesize all agent reports into a final summary."""
         triage = reports.get("task-triage")
         evidence = reports.get("task-evidence")
@@ -750,6 +772,8 @@ class OrchestratorAgent:
             verdict = "Moderate confidence in findings. Consider additional investigation."
         else:
             verdict = "Low confidence. Adaptive re-investigation recommended."
+            
+        messages_exchanged = [m.to_dict() for m in context.messages] if context else []
 
         return {
             "verdict": verdict,
@@ -761,6 +785,9 @@ class OrchestratorAgent:
             "response_actions": total_actions,
             "agents_used": len(reports),
             "all_succeeded": all(r.status == AgentStatus.COMPLETED for r in reports.values()),
+            "iterations": context.iteration if context else 0,
+            "confidence_history": context.confidence_history if context else [],
+            "messages_exchanged": len(messages_exchanged),
             "executive_summary": (
                 f"Investigation complete. Severity: {severity}. "
                 f"Root cause: {root_cause} (confidence: {confidence:.0%}). "

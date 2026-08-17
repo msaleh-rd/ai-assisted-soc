@@ -68,6 +68,9 @@ class InvestigationProgress:
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     total_duration_ms: int = 0
+    iteration: int = 0
+    confidence_history: List[float] = field(default_factory=list)
+    messages: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # ============================================================
@@ -91,58 +94,69 @@ def _agent_report_to_dto(report) -> AgentReportDTO:
 
 
 @activity.defn(name="triage_activity")
-async def triage_activity(inputs: Dict[str, Any]) -> Dict[str, Any]:
+async def triage_activity(context_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Run the TriageAgent on the alert data."""
     from backend.services.orchestrator import TriageAgent
+    from backend.services.investigation_context import InvestigationContext
+    context = InvestigationContext.from_dict(context_dict)
     agent = TriageAgent()
-    report = await agent.execute(inputs, {})
-    return asdict(_agent_report_to_dto(report))
+    report = await agent.execute({}, context)
+    return {"report": asdict(_agent_report_to_dto(report)), "context": context.to_dict()}
 
 
 @activity.defn(name="evidence_activity")
-async def evidence_activity(inputs: Dict[str, Any]) -> Dict[str, Any]:
+async def evidence_activity(context_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Run the EvidenceAgent to expand entity graph."""
     from backend.services.orchestrator import EvidenceAgent
+    from backend.services.investigation_context import InvestigationContext
+    context = InvestigationContext.from_dict(context_dict)
     agent = EvidenceAgent()
-    report = await agent.execute(inputs, {})
-    return asdict(_agent_report_to_dto(report))
+    report = await agent.execute({}, context)
+    return {"report": asdict(_agent_report_to_dto(report)), "context": context.to_dict()}
 
 
 @activity.defn(name="discovery_activity")
-async def discovery_activity(inputs: Dict[str, Any]) -> Dict[str, Any]:
+async def discovery_activity(context_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Run the NetworkDiscoveryAgent."""
-
     from backend.services.orchestrator import NetworkDiscoveryAgent
+    from backend.services.investigation_context import InvestigationContext
+    context = InvestigationContext.from_dict(context_dict)
     agent = NetworkDiscoveryAgent()
-    report = await agent.execute(inputs, {})
-    return asdict(_agent_report_to_dto(report))
+    report = await agent.execute({}, context)
+    return {"report": asdict(_agent_report_to_dto(report)), "context": context.to_dict()}
 
 
 @activity.defn(name="compression_activity")
-async def compression_activity(inputs: Dict[str, Any]) -> Dict[str, Any]:
+async def compression_activity(context_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Run the CompressionAgent (7-stage pipeline)."""
     from backend.services.orchestrator import CompressionAgent
+    from backend.services.investigation_context import InvestigationContext
+    context = InvestigationContext.from_dict(context_dict)
     agent = CompressionAgent()
-    report = await agent.execute(inputs, {})
-    return asdict(_agent_report_to_dto(report))
+    report = await agent.execute({}, context)
+    return {"report": asdict(_agent_report_to_dto(report)), "context": context.to_dict()}
 
 
 @activity.defn(name="rca_activity")
-async def rca_activity(inputs: Dict[str, Any]) -> Dict[str, Any]:
+async def rca_activity(context_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Run the RCAAnalystAgent."""
     from backend.services.orchestrator import RCAAnalystAgent
+    from backend.services.investigation_context import InvestigationContext
+    context = InvestigationContext.from_dict(context_dict)
     agent = RCAAnalystAgent()
-    report = await agent.execute(inputs, {})
-    return asdict(_agent_report_to_dto(report))
+    report = await agent.execute({}, context)
+    return {"report": asdict(_agent_report_to_dto(report)), "context": context.to_dict()}
 
 
 @activity.defn(name="response_activity")
-async def response_activity(inputs: Dict[str, Any]) -> Dict[str, Any]:
+async def response_activity(context_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Run the ResponsePlannerAgent."""
     from backend.services.orchestrator import ResponsePlannerAgent
+    from backend.services.investigation_context import InvestigationContext
+    context = InvestigationContext.from_dict(context_dict)
     agent = ResponsePlannerAgent()
-    report = await agent.execute(inputs, {})
-    return asdict(_agent_report_to_dto(report))
+    report = await agent.execute({}, context)
+    return {"report": asdict(_agent_report_to_dto(report)), "context": context.to_dict()}
 
 
 @activity.defn(name="persist_investigation_results_activity")
@@ -316,6 +330,10 @@ class InvestigationWorkflow:
         run_id = f"run-{workflow.info().workflow_id[:8]}"
         run_start = workflow.now()
 
+        from backend.services.investigation_context import InvestigationContext
+        context = InvestigationContext(alert_data=input.alert_data)
+        context_dict = context.to_dict()
+
         self._progress.run_id = run_id
         self._progress.status = "planning"
         self._progress.started_at = run_start.isoformat()
@@ -353,52 +371,115 @@ class InvestigationWorkflow:
             maximum_interval=timedelta(seconds=30),
         )
 
-        for phase_idx, phase_tasks in enumerate(plan):
-            phase_num = phase_idx + 1
-            is_parallel = len(phase_tasks) > 1
-            self._progress.current_phase = phase_num
+        # Phase 1: Triage
+        phase_idx = 0
+        self._progress.current_phase = 1
+        self._progress.phases[phase_idx]["status"] = "running"
+        task_def = plan[phase_idx][0]
+        result = await workflow.execute_activity(
+            task_def["activity"],
+            args=[context_dict],
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=retry_policy,
+        )
+        context_dict = result["context"]
+        all_reports[task_def["id"]] = result["report"]
+        self._progress.completed_reports[task_def["id"]] = result["report"]
+        self._progress.phases[phase_idx]["status"] = "completed"
+
+        # Adaptive Loop for Phases 2, 3, 4
+        looping = True
+        while looping:
+            ctx_obj = InvestigationContext.from_dict(context_dict)
+            ctx_obj.confidence_history.append(ctx_obj.rca_findings.get("confidence_score", 0.0))
+            context_dict = ctx_obj.to_dict()
+
+            # Phase 2: Evidence + Discovery
+            phase_idx = 1
+            self._progress.current_phase = 2
             self._progress.phases[phase_idx]["status"] = "running"
-
-            # Resolve inputs from previous phase reports
-            resolved = []
-            for task_def in phase_tasks:
-                task_inputs = self._resolve_inputs(
-                    task_def["agent"], all_reports, input.alert_data
-                )
-                resolved.append((task_def, task_inputs))
-
-            # Execute activities
-            if is_parallel:
-                # Run activities concurrently
-                results = await asyncio.gather(
-                    *[
-                        workflow.execute_activity(
-                            td["activity"],
-                            args=[ti],
-                            start_to_close_timeout=timedelta(seconds=60),
-                            retry_policy=retry_policy,
-                        )
-                        for td, ti in resolved
-                    ]
-                )
-                for (task_def, _), result in zip(resolved, results):
-                    all_reports[task_def["id"]] = result
-                    self._progress.completed_reports[task_def["id"]] = result
-            else:
-                task_def, task_inputs = resolved[0]
-                result = await workflow.execute_activity(
-                    task_def["activity"],
-                    args=[task_inputs],
-                    start_to_close_timeout=timedelta(seconds=60),
-                    retry_policy=retry_policy,
-                )
-                all_reports[task_def["id"]] = result
-                self._progress.completed_reports[task_def["id"]] = result
-
+            
+            results = await asyncio.gather(
+                *[
+                    workflow.execute_activity(
+                        td["activity"],
+                        args=[context_dict],
+                        start_to_close_timeout=timedelta(seconds=60),
+                        retry_policy=retry_policy,
+                    )
+                    for td in plan[phase_idx]
+                ]
+            )
+            for td, res in zip(plan[phase_idx], results):
+                if td["id"] == "task-evidence":
+                    context_dict = res["context"]
+                all_reports[td["id"]] = res["report"]
+                self._progress.completed_reports[td["id"]] = res["report"]
             self._progress.phases[phase_idx]["status"] = "completed"
 
+            # Phase 3: Compression
+            phase_idx = 2
+            self._progress.current_phase = 3
+            self._progress.phases[phase_idx]["status"] = "running"
+            task_def = plan[phase_idx][0]
+            result = await workflow.execute_activity(
+                task_def["activity"],
+                args=[context_dict],
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=retry_policy,
+            )
+            context_dict = result["context"]
+            all_reports[task_def["id"]] = result["report"]
+            self._progress.completed_reports[task_def["id"]] = result["report"]
+            self._progress.phases[phase_idx]["status"] = "completed"
+
+            # Phase 4: RCA
+            phase_idx = 3
+            self._progress.current_phase = 4
+            self._progress.phases[phase_idx]["status"] = "running"
+            task_def = plan[phase_idx][0]
+            result = await workflow.execute_activity(
+                task_def["activity"],
+                args=[context_dict],
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=retry_policy,
+            )
+            context_dict = result["context"]
+            all_reports[task_def["id"]] = result["report"]
+            self._progress.completed_reports[task_def["id"]] = result["report"]
+            self._progress.phases[phase_idx]["status"] = "completed"
+
+            # Adaptive Loop Check
+            ctx_obj = InvestigationContext.from_dict(context_dict)
+            self._progress.iteration = ctx_obj.iteration
+            self._progress.confidence_history = ctx_obj.confidence_history
+            self._progress.messages = [m.to_dict() for m in ctx_obj.messages]
+            
+            if ctx_obj.needs_reinvestigation():
+                ctx_obj.iteration += 1
+                self._progress.iteration = ctx_obj.iteration
+                context_dict = ctx_obj.to_dict()
+            else:
+                looping = False
+
+        # Phase 5: Response
+        phase_idx = 4
+        self._progress.current_phase = 5
+        self._progress.phases[phase_idx]["status"] = "running"
+        task_def = plan[phase_idx][0]
+        result = await workflow.execute_activity(
+            task_def["activity"],
+            args=[context_dict],
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=retry_policy,
+        )
+        context_dict = result["context"]
+        all_reports[task_def["id"]] = result["report"]
+        self._progress.completed_reports[task_def["id"]] = result["report"]
+        self._progress.phases[phase_idx]["status"] = "completed"
+
         # ---- SYNTHESIS ----
-        synthesis = self._synthesize(all_reports)
+        synthesis = self._synthesize(all_reports, InvestigationContext.from_dict(context_dict))
 
         total_duration_ms = int(
             (workflow.now() - run_start).total_seconds() * 1000
@@ -407,7 +488,6 @@ class InvestigationWorkflow:
         self._progress.synthesis = synthesis
 
         # ---- APPROVAL GATE ----
-        # If response actions are planned, wait for human approval
         response_report = all_reports.get("task-response", {})
         actions_recommended = response_report.get("findings", {}).get("actions_recommended", [])
         
@@ -418,7 +498,6 @@ class InvestigationWorkflow:
             if self._approval_decision == "approve":
                 self._progress.status = "executing_response"
                 try:
-                    # Execute response actions
                     await workflow.execute_activity(
                         "execute_response_activity",
                         args=[self._progress.run_id, response_report],
@@ -431,7 +510,6 @@ class InvestigationWorkflow:
         self._progress.completed_at = workflow.now().isoformat()
         self._progress.total_duration_ms = total_duration_ms
         
-        # Persist the final state
         try:
             await workflow.execute_activity(
                 persist_investigation_results_activity,
@@ -509,58 +587,7 @@ class InvestigationWorkflow:
             ],
         ]
 
-    def _resolve_inputs(
-        self,
-        agent_name: str,
-        reports: Dict[str, Dict[str, Any]],
-        alert_data: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Resolve inputs for a given agent from previous reports."""
-        inputs: Dict[str, Any] = {}
-
-        if agent_name == "triage_agent":
-            inputs["alert"] = alert_data
-
-        elif agent_name == "evidence_agent":
-            triage = reports.get("task-triage", {})
-            inputs["entities"] = triage.get("findings", {}).get(
-                "entities_identified", []
-            )
-
-        elif agent_name == "discovery_agent":
-            triage = reports.get("task-triage", {})
-            inputs["entities"] = triage.get("findings", {}).get(
-                "entities_identified", []
-            )
-
-        elif agent_name == "compression_agent":
-            evidence = reports.get("task-evidence", {})
-            inputs["entity_count"] = evidence.get("findings", {}).get(
-                "entity_graph_size", 5
-            )
-
-        elif agent_name == "rca_agent":
-            evidence = reports.get("task-evidence", {})
-            triage = reports.get("task-triage", {})
-            inputs["entity_graph"] = evidence.get("findings", {}).get(
-                "entity_graph", {}
-            )
-            inputs["classification"] = triage.get("findings", {}).get(
-                "classification", "unknown"
-            )
-
-        elif agent_name == "response_agent":
-            rca = reports.get("task-rca", {})
-            triage = reports.get("task-triage", {})
-            inputs["root_cause"] = rca.get("findings", {}).get("root_cause", "")
-            inputs["attack_chain"] = rca.get("findings", {}).get("attack_chain", [])
-            inputs["entities"] = triage.get("findings", {}).get(
-                "entities_identified", []
-            )
-
-        return inputs
-
-    def _synthesize(self, reports: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    def _synthesize(self, reports: Dict[str, Dict[str, Any]], context: Any) -> Dict[str, Any]:
         """Synthesise all agent reports into a final verdict."""
         triage = reports.get("task-triage", {}).get("findings", {})
         evidence = reports.get("task-evidence", {}).get("findings", {})
@@ -582,6 +609,8 @@ class InvestigationWorkflow:
         else:
             verdict = "Low confidence. Adaptive re-investigation recommended."
 
+        messages_exchanged = [m.to_dict() for m in context.messages] if context else []
+
         return {
             "verdict": verdict,
             "severity": severity,
@@ -594,6 +623,9 @@ class InvestigationWorkflow:
             "all_succeeded": all(
                 r.get("status") == "completed" for r in reports.values()
             ),
+            "iterations": context.iteration if context else 0,
+            "confidence_history": context.confidence_history if context else [],
+            "messages_exchanged": len(messages_exchanged),
             "executive_summary": (
                 f"Investigation complete. Severity: {severity}. "
                 f"Root cause: {root_cause} (confidence: {confidence:.0%}). "

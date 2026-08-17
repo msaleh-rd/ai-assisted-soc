@@ -68,11 +68,25 @@ class PromptManager:
         try:
             # Simple format, allows missing keys to be left as-is if desired, 
             # but standard format requires all keys.
-            return template.format(**kwargs)
+            result_prompt = template.format(**kwargs)
         except KeyError as e:
             logger.error(f"Missing format variable {e} for prompt '{name}'")
             # Fallback string
-            return f"{template}\n[Variables: {kwargs}]"
+            result_prompt = f"{template}\n[Variables: {kwargs}]"
+            
+        few_shots = prompt_data.get("few_shot_examples", [])
+        if few_shots:
+            examples_str = "\n\n--- EXAMPLES ---\n\n"
+            for i, example in enumerate(few_shots, 1):
+                examples_str += f"Example {i}:\n"
+                if "input" in example:
+                    examples_str += f"Input:\n{example['input']}\n"
+                if "output" in example:
+                    examples_str += f"Output:\n{example['output']}\n"
+                examples_str += "-" * 20 + "\n"
+            result_prompt += examples_str
+            
+        return result_prompt
 
 # Singleton instance
 prompt_manager = PromptManager()

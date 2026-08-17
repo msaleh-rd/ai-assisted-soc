@@ -10,6 +10,10 @@ document.querySelectorAll('.nav-item').forEach(item => {
         document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
         item.classList.add('active');
         document.getElementById(`page-${page}`).classList.add('active');
+        
+        if (page === 'approvals') {
+            loadPendingApprovals();
+        }
     });
 });
 
@@ -1187,32 +1191,70 @@ async function handleApproval(workflowId, decision) {
     }
 }
 
-function addPendingApproval(workflowId) {
+function addPendingApproval(workflowId, actions = [], confidence = 0, entities = [], summary = "") {
     const list = document.getElementById('approvalsList');
     if (list.innerHTML.includes('No pending approvals')) {
         list.innerHTML = '';
     }
     
+    // Don't duplicate
+    if (document.getElementById(`approval-${workflowId}`)) return;
+    
     // Add badge notification
     const badge = document.getElementById('approvalBadge');
     badge.style.display = 'inline-block';
-    badge.textContent = parseInt(badge.textContent) + 1;
     
     const card = document.createElement('div');
     card.className = 'agent-card';
     card.id = `approval-${workflowId}`;
+    
+    let actionsHtml = actions.map(a => `<li>${a}</li>`).join('');
+    let entitiesHtml = entities.map(e => `<span class="badge" style="margin-right:5px; background:var(--bg-lighter)">${e.id} (${e.type})</span>`).join('');
+    
     card.innerHTML = `
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-            <div>
-                <h4 style="margin:0 0 5px 0;">Workflow: ${workflowId}</h4>
-                <div style="font-size:0.85rem; color:var(--text-muted);">AI recommends active response. Requires authorization.</div>
+        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+            <div style="flex: 1;">
+                <h4 style="margin:0 0 10px 0;">Workflow: ${workflowId} <span class="badge badge-red" style="float:right">Confidence: ${Math.round(confidence * 100)}%</span></h4>
+                <div style="font-size:0.9rem; margin-bottom: 10px;"><strong>Summary:</strong> ${summary || 'AI recommends active response. Requires authorization.'}</div>
+                ${entities.length > 0 ? `<div style="margin-bottom: 10px;"><strong>Affected Entities:</strong><br>${entitiesHtml}</div>` : ''}
+                ${actions.length > 0 ? `<div style="background: var(--bg-darker); padding: 10px; border-radius: 4px; border-left: 3px solid var(--accent-red);"><strong>Recommended Actions:</strong><ul style="margin: 5px 0 0 20px; padding: 0;">${actionsHtml}</ul></div>` : ''}
             </div>
-            <div style="display: flex; gap: 10px;">
-                <button class="btn btn-sm" style="background:var(--accent-red); color:white; border:none;" onclick="handleApproval('${workflowId}', 'reject')">Reject</button>
+            <div style="display: flex; flex-direction: column; gap: 10px; margin-left: 15px; min-width: 100px;">
                 <button class="btn btn-sm btn-primary" onclick="handleApproval('${workflowId}', 'approve')">Approve</button>
+                <button class="btn btn-sm" style="background:var(--accent-red); color:white; border:none;" onclick="handleApproval('${workflowId}', 'reject')">Reject</button>
             </div>
         </div>
     `;
-    list.prepend(card);
+    list.appendChild(card);
 }
 
+async function loadPendingApprovals() {
+    try {
+        const list = document.getElementById('approvalsList');
+        const badge = document.getElementById('approvalBadge');
+        
+        list.innerHTML = '<div style="color: var(--text-muted); font-style: italic;">Loading...</div>';
+        
+        const res = await apiFetch('/api/v3/orchestrator/approvals/pending');
+        if (res.ok) {
+            list.innerHTML = '';
+            const pending = res.data.pending_approvals || [];
+            
+            if (pending.length === 0) {
+                list.innerHTML = '<div style="color: var(--text-muted); font-style: italic;">No pending approvals at this time.</div>';
+                badge.style.display = 'none';
+                badge.textContent = '0';
+                return;
+            }
+            
+            badge.textContent = pending.length;
+            badge.style.display = 'inline-block';
+            
+            pending.forEach(p => {
+                addPendingApproval(p.workflow_id, p.actions, p.confidence, p.entities, p.summary);
+            });
+        }
+    } catch (e) {
+        console.error("Failed to load pending approvals", e);
+    }
+}
