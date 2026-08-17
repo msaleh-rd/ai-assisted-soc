@@ -998,7 +998,13 @@ function handleOrchEvent(type, data) {
 
         case 'phase_start':
             const parallelNote = data.parallel ? ' [PARALLEL]' : '';
-            addOrchLog(type, 'orchestrator', `Phase ${data.phase_num} starting${parallelNote}: ${data.agents.join(', ')}`);
+            addOrchLog(type, 'orchestrator', `Starting Phase ${data.phase_num}${parallelNote}`);
+            break;
+
+        case 'pending_approval':
+            setOrchStatus('pending_approval');
+            addOrchLog('warning', 'orchestrator', `Workflow paused. Human authorization required for active response.`);
+            addPendingApproval(data.workflow_id);
             break;
 
         case 'agent_start':
@@ -1155,3 +1161,58 @@ function escapeHtml(str) {
     div.textContent = String(str);
     return div.innerHTML;
 }
+
+// --- Human in the Loop Approvals ---
+async function handleApproval(workflowId, decision) {
+    try {
+        const res = await apiFetch(`/api/v3/orchestrator/investigate/${workflowId}/approve`, {
+            method: 'POST',
+            body: JSON.stringify({ decision, comment: "Decision from UI" })
+        });
+        if (res.ok) {
+            const el = document.getElementById(`approval-${workflowId}`);
+            if (el) el.innerHTML = `<span class="badge badge-green">Decision: ${decision}</span>`;
+            
+            // update badge
+            const badge = document.getElementById('approvalBadge');
+            let count = parseInt(badge.textContent);
+            if (count > 0) count--;
+            badge.textContent = count;
+            if (count === 0) badge.style.display = 'none';
+        } else {
+            alert("Failed to submit approval: " + (typeof res.data === 'object' ? JSON.stringify(res.data) : res.data));
+        }
+    } catch (e) {
+        alert("Error: " + e.message);
+    }
+}
+
+function addPendingApproval(workflowId) {
+    const list = document.getElementById('approvalsList');
+    if (list.innerHTML.includes('No pending approvals')) {
+        list.innerHTML = '';
+    }
+    
+    // Add badge notification
+    const badge = document.getElementById('approvalBadge');
+    badge.style.display = 'inline-block';
+    badge.textContent = parseInt(badge.textContent) + 1;
+    
+    const card = document.createElement('div');
+    card.className = 'agent-card';
+    card.id = `approval-${workflowId}`;
+    card.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <h4 style="margin:0 0 5px 0;">Workflow: ${workflowId}</h4>
+                <div style="font-size:0.85rem; color:var(--text-muted);">AI recommends active response. Requires authorization.</div>
+            </div>
+            <div style="display: flex; gap: 10px;">
+                <button class="btn btn-sm" style="background:var(--accent-red); color:white; border:none;" onclick="handleApproval('${workflowId}', 'reject')">Reject</button>
+                <button class="btn btn-sm btn-primary" onclick="handleApproval('${workflowId}', 'approve')">Approve</button>
+            </div>
+        </div>
+    `;
+    list.prepend(card);
+}
+

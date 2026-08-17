@@ -179,6 +179,14 @@ async def stream_investigation(workflow_id: str):
                     })
                     last_reports.add(task_id)
 
+            # Wait for approval state
+            if status == "pending_approval" and "pending_approval" not in last_reports:
+                yield _sse("pending_approval", {
+                    "workflow_id": workflow_id,
+                    "status": "pending_approval"
+                })
+                last_reports.add("pending_approval")
+                
             # Terminal state
             if status == "completed":
                 yield _sse("run_complete", {
@@ -226,6 +234,31 @@ async def list_investigations():
     investigations = await fetch_list(limit=50)
     return {"investigations": investigations, "count": len(investigations)}
 
+from pydantic import BaseModel
+class ApprovalDecision(BaseModel):
+    decision: str
+    comment: str = ""
+
+@router.post("/investigate/{workflow_id}/approve")
+async def approve_response(workflow_id: str, decision: ApprovalDecision):
+    """
+    Approve or reject a response plan that is pending approval.
+    """
+    if not USE_TEMPORAL:
+        raise HTTPException(status_code=400, detail="Only supported in Temporal mode")
+        
+    try:
+        from temporalio.client import Client
+        import os
+        temporal_host = os.getenv("TEMPORAL_HOST", "127.0.0.1:7233")
+        client = await Client.connect(temporal_host)
+        handle = client.get_workflow_handle(workflow_id)
+        
+        await handle.signal("approve_response", args=[decision.decision, decision.comment])
+        
+        return {"status": "success", "message": f"Signal {decision.decision} sent"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/investigate/{workflow_id}")
 async def cancel_investigation(workflow_id: str):

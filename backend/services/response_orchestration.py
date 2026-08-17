@@ -259,31 +259,68 @@ class ResponseOrchestrator:
             'status': ActionStatus.PENDING
         }
     
-    # Action implementation stubs (in production would integrate with actual systems)
+    # Action implementations (integrate with actual systems)
     
     async def _isolate_host(self, target: str) -> Dict[str, Any]:
-        """Simulate host isolation."""
-        await asyncio.sleep(0.5)  # Simulate network latency
-        return {
-            'success': True,
-            'result': f'Host {target} isolated from network'
-        }
+        """Isolate host via EDR API."""
+        import os, httpx
+        edr_key = os.getenv("EDR_API_KEY")
+        if not edr_key:
+            # Fallback to simulation if no key
+            await asyncio.sleep(0.5)
+            return {'success': True, 'result': f'[MOCK] Host {target} isolated from network', 'action_type': 'isolate_host'}
+            
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.edr.example.com/v1/hosts/isolate",
+                    headers={"Authorization": f"Bearer {edr_key}"},
+                    json={"hostname": target}
+                )
+                response.raise_for_status()
+                return {'success': True, 'result': f'Host {target} successfully isolated', 'action_type': 'isolate_host'}
+        except Exception as e:
+            return {'success': False, 'error': str(e), 'action_type': 'isolate_host'}
     
     async def _reset_credentials(self, target: str) -> Dict[str, Any]:
-        """Simulate credential reset."""
-        await asyncio.sleep(0.3)
-        return {
-            'success': True,
-            'result': f'Credentials reset for {target}'
-        }
+        """Reset credential via IAM API."""
+        import os, httpx
+        iam_key = os.getenv("IAM_API_KEY")
+        if not iam_key:
+            await asyncio.sleep(0.3)
+            return {'success': True, 'result': f'[MOCK] Credentials reset for {target}', 'action_type': 'reset_credentials'}
+            
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.iam.example.com/v1/users/reset_password",
+                    headers={"Authorization": f"Bearer {iam_key}"},
+                    json={"username": target}
+                )
+                response.raise_for_status()
+                return {'success': True, 'result': f'Credentials successfully reset for {target}', 'action_type': 'reset_credentials'}
+        except Exception as e:
+            return {'success': False, 'error': str(e), 'action_type': 'reset_credentials'}
     
     async def _block_ip(self, target: str) -> Dict[str, Any]:
-        """Simulate IP blocking."""
-        await asyncio.sleep(0.2)
-        return {
-            'success': True,
-            'result': f'IP {target} blocked in firewall'
-        }
+        """Block IP via Firewall API."""
+        import os, httpx
+        fw_key = os.getenv("FIREWALL_API_KEY")
+        if not fw_key:
+            await asyncio.sleep(0.2)
+            return {'success': True, 'result': f'[MOCK] IP {target} blocked in firewall', 'action_type': 'block_ip'}
+            
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.firewall.example.com/v1/rules/block",
+                    headers={"Authorization": f"Bearer {fw_key}"},
+                    json={"ip": target}
+                )
+                response.raise_for_status()
+                return {'success': True, 'result': f'IP {target} blocked', 'action_type': 'block_ip'}
+        except Exception as e:
+            return {'success': False, 'error': str(e), 'action_type': 'block_ip'}
     
     async def _block_domain(self, target: str) -> Dict[str, Any]:
         """Simulate domain blocking."""

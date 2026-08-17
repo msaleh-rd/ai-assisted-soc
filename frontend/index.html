@@ -41,6 +41,10 @@
             <li class="nav-item" data-page="response">
                 <span class="nav-icon">&#9889;</span> Response Orchestration
             </li>
+            <li class="nav-item" data-page="approvals">
+                <span class="nav-icon">&#9989;</span> Pending Approvals
+                <span id="approvalBadge" class="badge" style="display:none; margin-left: 5px; background: var(--accent-red);">0</span>
+            </li>
             <li class="nav-item" data-page="incidents">
                 <span class="nav-icon">&#128196;</span> Incidents &amp; Reports
             </li>
@@ -417,6 +421,21 @@
                         <div class="action-name">Update Firewall</div>
                         <div class="action-time">~5 min</div>
                     </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Pending Approvals -->
+        <div class="page" id="page-approvals">
+            <div class="page-header">
+                <h1>Pending Approvals</h1>
+                <span class="badge badge-red">Human-in-the-Loop</span>
+            </div>
+            <div class="panel">
+                <h3>Action Required</h3>
+                <p class="description">The AI has recommended containment actions that require human authorization before execution.</p>
+                <div id="approvalsList">
+                    <div style="color: var(--text-muted); font-style: italic;">No pending approvals at this time.</div>
                 </div>
             </div>
         </div>

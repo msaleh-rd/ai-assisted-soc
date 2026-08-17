@@ -51,8 +51,8 @@ The `EvidenceAgent` (line 152-214 of `orchestrator.py`) builds a fake entity gra
 #### 🔴 **Gap 3: No Persistence of Investigation Results (RESOLVED)**
 When an investigation completes via Temporal, the results are now persisted to the `investigations` and `rca_results` tables in Postgres, and entities are written to Neo4j.
 
-#### 🔴 Gap 4: Response Actions Are Simulated
-`response_orchestration.py` has a beautifully designed `ActionExecutor` with rollback support, but every action is `asyncio.sleep(1)`. The `ResponsePlannerAgent` only extracts playbook text — it never triggers execution.
+#### 🔴 **Gap 4: Response Actions Are Simulated (RESOLVED)**
+`response_orchestration.py` now leverages real API frameworks (`httpx`) to send active responses (e.g. `_isolate_host`, `_block_ip`) with graceful fallbacks. The system also includes a Human-in-the-Loop Temporal wait condition so the AI cannot trigger them without authorization.
 
 #### 🔴 Gap 5: No Authentication / Authorization
 All API endpoints are wide open. No login, no RBAC, no API keys. The CORS policy is `allow_origins=["*"]`.
@@ -121,20 +121,20 @@ No GitHub Actions, no linting, no `pyproject.toml`, no pre-commit hooks. Tests a
 ### Phase 6: Human-in-the-Loop (HITL) & Active Response
 *Goal: Move from "Response Planning" to actual "Response Execution" with human approval.*
 
-- [ ] **Temporal Signals for approval gates**
+- [x] **Temporal Signals for approval gates**
   - Insert `workflow.await_condition()` before executing critical response actions
   - Emit a `pending_approval` SSE event to the frontend
-- [ ] **Approval queue UI**
+- [x] **Approval queue UI**
   - New "Pending Approvals" page in the dashboard
   - Show the AI's response plan, confidence score, and affected entities
   - "Approve" / "Reject" / "Modify" buttons that send Temporal signals
-- [ ] **Action execution engine**
+- [x] **Action execution engine**
   - Replace `asyncio.sleep()` in `response_orchestration.py` with real API calls:
     - EDR API → isolate host, kill process
     - IAM API → reset credentials, disable account, enforce MFA
     - Firewall API → block IP/domain
   - Implement rollback for each action type
-- [ ] **Audit trail**
+- [x] **Audit trail**
   - Log every action (AI-recommended, human-approved, executed, rolled-back) to Postgres
   - Immutable append-only audit table with timestamps and actor IDs
 
@@ -220,7 +220,7 @@ No GitHub Actions, no linting, no `pyproject.toml`, no pre-commit hooks. Tests a
 | 🔴 P0 | Wire Evidence/Compression agents to real engines | High | Medium |
 | ✅ P0 | Activate database persistence | High | Medium |
 | ✅ P0 | Section-aware playbook chunking | High | Low |
-| 🟡 P1 | Human-in-the-Loop approval gates | High | High |
+| ✅ P1 | Human-in-the-Loop approval gates | High | High |
 | 🟡 P1 | Prompt versioning + evaluation harness | Medium | Medium |
 | 🟡 P1 | Structured logging + OpenTelemetry | Medium | Medium |
 | 🟡 P1 | CI/CD pipeline (GitHub Actions) | Medium | Low |

@@ -21,11 +21,11 @@ timeout /t 15
 
 REM 2. Start the local Temporal Worker in the background
 echo Starting local Temporal Worker...
-start "SOC Temporal Worker" cmd /c "set USE_TEMPORAL=true&& set TEMPORAL_HOST=localhost:7233&& .venv\Scripts\python.exe -m backend.services.temporal_worker"
+start "SOC Temporal Worker" cmd /c "set USE_TEMPORAL=true&& set TEMPORAL_HOST=localhost:7233&& set DATABASE_URL=postgresql://soc_user:soc_password@127.0.0.1:5433/soc_platform&& .venv\Scripts\python.exe -m backend.services.temporal_worker"
 
 REM 3. Start the local FastAPI backend
 echo Starting local FastAPI API...
-start "SOC API" cmd /c "set USE_TEMPORAL=true&& set TEMPORAL_HOST=localhost:7233&& set PYTHONIOENCODING=utf-8&& .venv\Scripts\uvicorn.exe backend.main:app --host 0.0.0.0 --port 8000"
+start "SOC API" cmd /c "set USE_TEMPORAL=true&& set TEMPORAL_HOST=localhost:7233&& set DATABASE_URL=postgresql://soc_user:soc_password@127.0.0.1:5433/soc_platform&& set PYTHONIOENCODING=utf-8&& .venv\Scripts\uvicorn.exe backend.main:app --host 0.0.0.0 --port 8000"
 
 echo.
 echo [OK] All services are booting up!

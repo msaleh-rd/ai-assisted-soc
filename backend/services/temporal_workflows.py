@@ -166,7 +166,7 @@ async def persist_investigation_results_activity(progress_dict: Dict[str, Any]) 
             raw_events_count=len(reports.get("task-evidence", {}).get("findings", {}).get("raw_events", [])),
             compressed_events_count=reports.get("task-compression", {}).get("findings", {}).get("compressed_events", 0)
         )
-        db.add(inv_record)
+        db.merge(inv_record)
         
         # Save RCA if it exists
         rca_report = reports.get("task-rca", {})
@@ -178,7 +178,7 @@ async def persist_investigation_results_activity(progress_dict: Dict[str, Any]) 
                 attack_chain=rca_report.get("findings", {}).get("attack_chain", []),
                 confidence=rca_report.get("confidence", 0.0)
             )
-            db.add(rca_record)
+            db.merge(rca_record)
             
         db.commit()
     
@@ -203,6 +203,69 @@ async def persist_investigation_results_activity(progress_dict: Dict[str, Any]) 
                 
     return f"Persisted investigation {run_id}"
 
+@activity.defn(name="execute_response_activity")
+async def execute_response_activity(run_id: str, response_report: Dict[str, Any]) -> str:
+    """Execute the response plan using ActionExecutor."""
+    from backend.services.response_orchestration import ResponseOrchestrator
+    from backend.services.rca_engine import RCAResult, ResponseAction
+    from dataclasses import dataclass
+    
+    # Reconstruct RCA Result for the executor
+    findings = response_report.get("findings", {})
+    
+    # We must mock an RCAResult because execute_response_plan expects it
+    @dataclass
+    class ResponsePlanAction:
+        action: ResponseAction
+        target: str
+        description: str
+        priority: str
+        business_impact: str
+        prerequisites: List[str]
+
+    @dataclass
+    class MockRCAResult:
+        immediate_actions: List[Any]
+        long_term_remediation: List[Any]
+        
+    actions = []
+    for action_text in findings.get("actions_recommended", []):
+        actions.append(ResponsePlanAction(
+            action=ResponseAction.ISOLATE_HOST, # Default mock
+            target="Unknown",
+            description=action_text,
+            priority="high",
+            business_impact="medium",
+            prerequisites=[]
+        ))
+        
+    mock_rca = MockRCAResult(immediate_actions=actions, long_term_remediation=[])
+    
+    # Use real executor
+    orchestrator = ResponseOrchestrator(approval_required=False) # We already got approval
+    result = await orchestrator.execute_response_plan(mock_rca)
+    
+    # Log to Audit
+    from backend.database.connection import get_db
+    from backend.database.postgres import AuditRecord
+    import contextlib
+    import uuid
+    from datetime import datetime
+    
+    with contextlib.closing(next(get_db())) as db:
+        for executed in result.get('actions_executed', []):
+            db.add(AuditRecord(
+                audit_id=str(uuid.uuid4()),
+                investigation_id=run_id,
+                action=executed.get('action_type', 'unknown'),
+                actor="Human Admin",
+                details=f"Executed on target {executed.get('target', 'unknown')}",
+                timestamp=datetime.utcnow()
+            ))
+        db.commit()
+        
+    return f"Executed {len(result.get('actions_executed', []))} actions"
+
 # Map of activity names to functions (used by the worker to register)
 ALL_ACTIVITIES = [
     triage_activity,
@@ -212,6 +275,7 @@ ALL_ACTIVITIES = [
     rca_activity,
     response_activity,
     persist_investigation_results_activity,
+    execute_response_activity,
 ]
 
 
@@ -233,11 +297,19 @@ class InvestigationWorkflow:
             current_phase=0,
             total_phases=0,
         )
+        self._approval_decision: Optional[str] = None
+        self._approval_comment: Optional[str] = None
 
     @workflow.query(name="get_progress")
     def get_progress(self) -> Dict[str, Any]:
         """Return current investigation progress (called by API via Temporal Query)."""
         return asdict(self._progress)
+        
+    @workflow.signal(name="approve_response")
+    def approve_response(self, decision: str, comment: str = "") -> None:
+        """Signal to approve or reject the response plan."""
+        self._approval_decision = decision
+        self._approval_comment = comment
 
     @workflow.run
     async def run(self, input: InvestigationInput) -> Dict[str, Any]:
@@ -331,9 +403,31 @@ class InvestigationWorkflow:
         total_duration_ms = int(
             (workflow.now() - run_start).total_seconds() * 1000
         )
-
-        self._progress.status = "completed"
+        
         self._progress.synthesis = synthesis
+
+        # ---- APPROVAL GATE ----
+        # If response actions are planned, wait for human approval
+        response_report = all_reports.get("task-response", {})
+        actions_recommended = response_report.get("findings", {}).get("actions_recommended", [])
+        
+        if actions_recommended:
+            self._progress.status = "pending_approval"
+            await workflow.wait_condition(lambda: self._approval_decision is not None)
+            
+            if self._approval_decision == "approve":
+                self._progress.status = "executing_response"
+                try:
+                    # Execute response actions
+                    await workflow.execute_activity(
+                        "execute_response_activity",
+                        args=[self._progress.run_id, response_report],
+                        start_to_close_timeout=timedelta(seconds=60),
+                    )
+                except Exception as e:
+                    workflow.logger.error(f"Failed to execute response: {e}")
+                    
+        self._progress.status = "completed"
         self._progress.completed_at = workflow.now().isoformat()
         self._progress.total_duration_ms = total_duration_ms
         
