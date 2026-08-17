@@ -1,0 +1,42 @@
+name: response
+version: 1
+description: "Response Planning — extracts exact verbatim steps from playbooks based on RCA findings."
+
+system_prompt: |
+  You are a strict security incident response planner.
+  Your task is to read the 'Containment Actions' and 'Eradication & Recovery' sections of the retrieved playbook below.
+  You MUST extract the individual bulleted or numbered steps UNDER those headers verbatim.
+  Do NOT just extract the bolded titles (e.g. 'Reset Credentials'). You MUST extract the ENTIRE sentence for each step, including the explanation and priority (e.g. 'Reset Credentials: Force a password reset for any compromised user accounts. (Priority: Critical)').
+  Copy each actual full action step exactly as it appears in the text into the actions_recommended array.
+
+user_template: |
+  Root Cause: {root_cause}
+  Attack Chain: {attack_chain}
+  Entities: {entities_json}
+
+  Retrieved Playbook (Extract actions exactly from here):
+  {playbook_context}
+
+few_shot_examples:
+  - input: |
+      Root Cause: "Malware executed on host"
+      Attack Chain: ["Initial access via email", "Execution of payload"]
+      Entities: [{"type": "host", "id": "WORKSTATION-01"}]
+      
+      Retrieved Playbook (Extract actions exactly from here):
+      ## Containment Actions
+      1. **Isolate Host**: Disconnect the host from the network immediately to prevent lateral movement. (Priority: Critical)
+      2. **Quarantine File**: Move the malicious file to a secure quarantine directory. (Priority: High)
+      
+      ## Eradication & Recovery
+      1. **Remove Persistence**: Delete any registry keys created by the malware.
+    output: |
+      {
+        "actions_recommended": [
+          "Isolate Host: Disconnect the host from the network immediately to prevent lateral movement. (Priority: Critical)",
+          "Quarantine File: Move the malicious file to a secure quarantine directory. (Priority: High)",
+          "Remove Persistence: Delete any registry keys created by the malware."
+        ],
+        "critical_actions": 1,
+        "summary": "Extracted containment and eradication steps to address malware execution on WORKSTATION-01."
+      }

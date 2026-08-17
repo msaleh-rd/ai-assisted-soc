@@ -117,19 +117,21 @@ class TriageAgent(BaseAgent):
         alert = inputs.get("alert", {})
 
         from backend.services.llm_client import get_llm, TriageOutput
+        from backend.services.prompt_manager import prompt_manager
         import json
         
-        llm = get_llm()
+        llm = get_llm(role="triage")
         structured_llm = llm.with_structured_output(TriageOutput)
         
-        prompt = f"Analyze the following security alert and provide a triage assessment:\n\n{json.dumps(alert, indent=2)}"
+        system_prompt = prompt_manager.get_system_prompt("triage")
+        user_prompt = prompt_manager.build_user_prompt("triage", alert_json=json.dumps(alert, indent=2))
+        prompt = f"{system_prompt}\n\n{user_prompt}"
         
         try:
-            # Langchain invoke is synchronous by default unless we use ainvoke, but LM Studio structured output might work best synchronously or with run_in_executor
-            # We'll use ainvoke to not block the asyncio event loop
             result = await structured_llm.ainvoke(prompt)
             findings = result.model_dump()
             findings["entity_count"] = len(findings.get("entities_identified", []))
+            findings["prompt_version"] = prompt_manager.get_prompt_metadata("triage")["version"]
             confidence = 0.95
         except Exception as e:
             # Fallback if LLM fails
@@ -338,17 +340,21 @@ class RCAAnalystAgent(BaseAgent):
         classification = inputs.get("classification", "unknown")
 
         from backend.services.llm_client import get_llm, RCAOutput
+        from backend.services.prompt_manager import prompt_manager
         import json
 
-        llm = get_llm()
+        llm = get_llm(role="rca")
         structured_llm = llm.with_structured_output(RCAOutput)
 
-        prompt = f"Perform Root Cause Analysis on the following entity graph and classification '{classification}'.\n\nEntity Graph: {json.dumps(entity_graph, indent=2)}\n\nDetermine the root cause, attack phases, and blast radius."
+        system_prompt = prompt_manager.get_system_prompt("rca")
+        user_prompt = prompt_manager.build_user_prompt("rca", classification=classification, entity_graph_json=json.dumps(entity_graph, indent=2))
+        prompt = f"{system_prompt}\n\n{user_prompt}"
 
         try:
             result = await structured_llm.ainvoke(prompt)
             findings = result.model_dump()
             confidence = findings.get("confidence", 0.85)
+            findings["prompt_version"] = prompt_manager.get_prompt_metadata("rca")["version"]
             findings["summary"] = f"Root cause identified: {findings.get('root_cause')}. Attack chain: {len(findings.get('attack_phases', []))} phases. Blast radius: {findings.get('blast_radius')} entities."
         except Exception as e:
             findings = {"error": str(e), "root_cause": "Unknown due to LLM error", "attack_phases": [], "blast_radius": 0, "summary": str(e)}
@@ -380,14 +386,17 @@ class ResponsePlannerAgent(BaseAgent):
         entities = inputs.get("entities", [])
 
         from backend.services.llm_client import get_llm, ResponseOutput
-        from backend.services.rag_service import get_retriever
+        from backend.services.prompt_manager import prompt_manager
+        from backend.services.rag_service import search_playbook
         import json
 
-        # 1. RAG Step: Retrieve playbook
+        # Need classification for section-aware playbook filtering
+        classification = inputs.get("classification", "unknown")
+
+        # 1. RAG Step: Retrieve playbook using section-aware search
         try:
-            retriever = get_retriever()
-            query = f"Find playbook for root cause: {root_cause} and attack chain: {attack_chain}"
-            docs = retriever.invoke(query)
+            query = f"root cause: {root_cause} | attack chain: {attack_chain}"
+            docs = search_playbook(query=query, classification=classification)
             
             # Combine the content of the top retrieved chunks
             playbook_context = "\n\n".join([doc.page_content for doc in docs]) if docs else "No specific playbook found."
@@ -395,24 +404,23 @@ class ResponsePlannerAgent(BaseAgent):
             playbook_context = f"Failed to retrieve playbooks (Vectorstore might be uninitialized): {str(e)}"
 
         # 2. LLM Step: Plan response
-        llm = get_llm()
+        llm = get_llm(role="response")
         structured_llm = llm.with_structured_output(ResponseOutput)
         
-        prompt = (
-            "You are a strict security incident response planner. "
-            "Your task is to read the 'Containment Actions' and 'Eradication & Recovery' sections of the retrieved playbook below. "
-            "You MUST extract the individual bulleted or numbered steps UNDER those headers verbatim. "
-            "Do NOT just extract the bolded titles (e.g. 'Reset Credentials'). You MUST extract the ENTIRE sentence for each step, including the explanation and priority (e.g. 'Reset Credentials: Force a password reset for any compromised user accounts. (Priority: Critical)'). "
-            "Copy each actual full action step exactly as it appears in the text into the actions_recommended array.\n\n"
-            f"Root Cause: {root_cause}\n"
-            f"Attack Chain: {attack_chain}\n"
-            f"Entities: {json.dumps(entities)}\n\n"
-            f"Retrieved Playbook (Extract actions exactly from here):\n{playbook_context}"
+        system_prompt = prompt_manager.get_system_prompt("response")
+        user_prompt = prompt_manager.build_user_prompt(
+            "response",
+            root_cause=root_cause,
+            attack_chain=attack_chain,
+            entities_json=json.dumps(entities, indent=2),
+            playbook_context=playbook_context
         )
+        prompt = f"{system_prompt}\n\n{user_prompt}"
 
         try:
             result = await structured_llm.ainvoke(prompt)
             findings = result.model_dump()
+            findings["prompt_version"] = prompt_manager.get_prompt_metadata("response")["version"]
             confidence = 0.90
         except Exception as e:
             findings = {"error": str(e), "actions_recommended": [], "critical_actions": 0, "summary": str(e)}
@@ -715,6 +723,7 @@ class OrchestratorAgent:
                 inputs["attack_chain"] = rca_report.findings.get("attack_chain", [])
             if triage_report:
                 inputs["entities"] = triage_report.findings.get("entities_identified", [])
+                inputs["classification"] = triage_report.findings.get("classification", "unknown")
 
         return inputs
 

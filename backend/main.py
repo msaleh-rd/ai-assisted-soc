@@ -7,14 +7,24 @@ from fastapi.staticfiles import StaticFiles
 from datetime import datetime
 import os
 
+from contextlib import asynccontextmanager
 from backend.api import router as api_router
+from backend.database.connection import init_db, close_db
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    init_db()
+    yield
+    # Shutdown
+    await close_db()
 
 # Create FastAPI app
 app = FastAPI(
     title="AI-Native SOC Platform - Phase 1-3",
     description="Alert Intake, Evidence Collection, Correlation/Compression, RCA & Response Orchestration",
     version="0.3.0",
+    lifespan=lifespan,
 )
 
 # Add CORS middleware

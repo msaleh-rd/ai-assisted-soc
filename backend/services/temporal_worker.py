@@ -32,6 +32,9 @@ logger = logging.getLogger("temporal-worker")
 async def main():
     """Connect to Temporal and run the worker until interrupted."""
     logger.info("Connecting to Temporal at %s (namespace=%s)…", TEMPORAL_HOST, TEMPORAL_NAMESPACE)
+    
+    from backend.database.connection import init_db
+    init_db()
 
     client = await Client.connect(TEMPORAL_HOST, namespace=TEMPORAL_NAMESPACE)
 

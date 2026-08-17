@@ -103,8 +103,20 @@ class AuditRecord(Base):
     timestamp = Column(DateTime, index=True, default=datetime.utcnow)
 
 
+class RCAResultRecord(Base):
+    """PostgreSQL model for Root Cause Analysis results."""
+    __tablename__ = "rca_results"
+    
+    rca_id = Column(String(36), primary_key=True)
+    investigation_id = Column(String(36), index=True)
+    root_cause = Column(Text)
+    attack_chain = Column(JSON)  # List of steps
+    confidence = Column(Float, default=0.0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 def get_database_url(
-    host: str = "localhost",
+    host: str = "127.0.0.1",
     port: int = 5432,
     database: str = "soc_platform",
     user: str = "soc_user",

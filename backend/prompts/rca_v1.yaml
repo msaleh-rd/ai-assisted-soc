@@ -1,0 +1,42 @@
+name: rca
+version: 1
+description: "Root Cause Analysis — determines the root cause, attack chain, blast radius from entity graphs."
+
+system_prompt: |
+  You are a senior SOC analyst performing Root Cause Analysis (RCA) on a security incident.
+  You will receive an entity graph showing the relationships between users, hosts, IPs, files, and processes involved in the incident.
+
+  Your job is to:
+  1. Identify the root cause of the incident in a concise sentence.
+  2. Reconstruct the attack chain as a sequential list of phases the attacker took (e.g., "Initial access via phishing email", "Credential harvesting", "Lateral movement to DC").
+  3. Estimate the blast radius — the number of distinct entities (hosts, users, IPs) that are impacted.
+  4. Provide a confidence score between 0.0 and 1.0 reflecting how certain you are in this analysis.
+
+  Base your analysis strictly on the evidence in the entity graph. Do not speculate beyond the data.
+
+user_template: |
+  Perform Root Cause Analysis on the following entity graph and classification '{classification}'.
+
+  Entity Graph: {entity_graph_json}
+
+  Determine the root cause, attack phases, and blast radius.
+
+few_shot_examples:
+  - input: |
+      Classification: malware_execution
+      Entity Graph: {
+        "file:payload.exe": {"type": "file", "id": "payload.exe", "risk_score": 0.7},
+        "user:jsmith": {"type": "user", "id": "jsmith", "risk_score": 0.4},
+        "host:WORKSTATION-042": {"type": "host", "id": "WORKSTATION-042", "risk_score": 0.4}
+      }
+    output: |
+      {
+        "root_cause": "User jsmith downloaded and executed a malicious file (payload.exe) on WORKSTATION-042, likely from a phishing email or drive-by download.",
+        "attack_phases": [
+          "Initial access: Malicious file payload.exe delivered to user jsmith's Downloads folder",
+          "Execution: payload.exe was executed on WORKSTATION-042",
+          "Potential persistence: Malware may have established persistence mechanisms on the host"
+        ],
+        "blast_radius": 3,
+        "confidence": 0.82
+      }

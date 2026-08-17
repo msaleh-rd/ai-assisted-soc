@@ -18,7 +18,6 @@ class AlertIntakeService:
     
     def __init__(self):
         self.deduplicator = AlertDeduplicator(window_seconds=1800)  # 30 minutes
-        self.alert_queue: List[NormalizedAlert] = []
     
     async def ingest_alert(self, raw_alert: Dict[str, Any], 
                           source: str) -> Dict[str, Any]:
@@ -56,9 +55,31 @@ class AlertIntakeService:
         # Deduplicate
         dedup_result = self.deduplicator.deduplicate(normalized_alert)
         final_alert = dedup_result.normalized_alert
+        # Persist to database
+        from backend.database.connection import get_db
+        from backend.database.postgres import AlertRecord
+        import contextlib
         
-        # Queue for evidence collection
-        self.alert_queue.append(final_alert)
+        with contextlib.closing(next(get_db())) as db:
+            db_alert = AlertRecord(
+                alert_id=final_alert.alert_id,
+                investigation_id=final_alert.investigation_id,
+                correlation_id=final_alert.correlation_id,
+                source_system=final_alert.source,
+                source_name=final_alert.source,
+                alert_name=final_alert.title,
+                alert_category=final_alert.classification.value if hasattr(final_alert.classification, 'value') else str(final_alert.classification),
+                severity=final_alert.severity.value,
+                confidence=final_alert.confidence,
+                status="pending_evidence_collection",
+                primary_entities=[e.dict() for e in final_alert.entities],
+                alert_metadata=final_alert.raw_data,
+                occurrence_count=final_alert.occurrence_count,
+                timestamp_generated=final_alert.timestamp,
+                timestamp_received=datetime.utcnow()
+            )
+            db.add(db_alert)
+            db.commit()
         
         return {
             'status': 'deduplicated' if dedup_result.is_duplicate else 'accepted',
@@ -91,16 +112,47 @@ class AlertIntakeService:
         return await asyncio.gather(*tasks)
     
     def get_pending_alerts(self) -> List[NormalizedAlert]:
-        """Get alerts pending evidence collection."""
-        alerts = self.alert_queue[:]
-        self.alert_queue.clear()
+        """Get all alerts currently pending evidence collection."""
+        from backend.database.connection import get_db
+        from backend.database.postgres import AlertRecord
+        import contextlib
+        from backend.models.alert import NormalizedAlert
+        
+        with contextlib.closing(next(get_db())) as db:
+            records = db.query(AlertRecord).filter(AlertRecord.status == "pending_evidence_collection").all()
+            
+            alerts = []
+            for record in records:
+                # Reconstruct NormalizedAlert from DB record (minimal reconstruction for API)
+                alert = NormalizedAlert(
+                    alert_id=record.alert_id,
+                    investigation_id=record.investigation_id,
+                    correlation_id=record.correlation_id,
+                    source=record.source_system,
+                    title=record.alert_name,
+                    classification=record.alert_category,
+                    severity=record.severity,
+                    confidence=record.confidence,
+                    entities=record.primary_entities or [],
+                    raw_data=record.alert_metadata,
+                    timestamp=record.timestamp_generated
+                )
+                alerts.append(alert)
+                
+                # Mark them as picked up so they don't get fetched again continuously
+                # (In a real system this would be a transaction or locked queue)
+                record.status = "in_progress"
+            
+            if records:
+                db.commit()
+                
         return alerts
     
     def get_stats(self) -> Dict[str, Any]:
         """Get intake service statistics."""
         return {
             'tracked_alerts': self.deduplicator.get_alert_count(),
-            'pending_evidence_collection': len(self.alert_queue),
+            'pending_evidence_collection': 0,
             'dedup_window_seconds': self.deduplicator.window_seconds,
         }
     

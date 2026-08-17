@@ -6,16 +6,32 @@ import os
 # Base URL for local LM Studio
 LM_STUDIO_URL = os.getenv("LM_STUDIO_URL", "http://127.0.0.1:1234/v1")
 # Model identifier can be anything or specifically match the loaded model
-MODEL_NAME = os.getenv("LLM_MODEL", "qwen2.5-7b-instruct")
+DEFAULT_MODEL = os.getenv("LLM_MODEL", "qwen2.5-7b-instruct")
 
-def get_llm():
-    """Returns a configured LangChain ChatOpenAI instance pointing to local LM Studio."""
+# Role-specific model overrides
+MODEL_ROUTING = {
+    "triage": os.getenv("LLM_TRIAGE_MODEL", DEFAULT_MODEL),
+    "rca": os.getenv("LLM_RCA_MODEL", DEFAULT_MODEL),
+    "response": os.getenv("LLM_RESPONSE_MODEL", DEFAULT_MODEL),
+}
+
+def get_llm(role: str = "default"):
+    """Returns a configured LangChain ChatOpenAI instance pointing to local LM Studio.
+    
+    Args:
+        role: The role of the agent ('triage', 'rca', 'response', etc.) for model routing.
+    """
+    model_name = MODEL_ROUTING.get(role, DEFAULT_MODEL)
+    
+    # Fast models for triage, powerful models for RCA/response
+    max_tokens = 512 if role == "triage" else 1024
+    
     return ChatOpenAI(
         base_url=LM_STUDIO_URL,
         api_key="lm-studio",  # API key is ignored by LM Studio but required by the client
-        model=MODEL_NAME,
+        model=model_name,
         temperature=0.1,  # Low temperature for deterministic security analysis
-        max_tokens=1024
+        max_tokens=max_tokens
     )
 
 

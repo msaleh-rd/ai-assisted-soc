@@ -1,0 +1,79 @@
+[
+  {
+    "id": "alert_malware_1",
+    "description": "Malware execution - CrowdStrike High severity",
+    "alert_data": {
+      "event_type": "DetectionSummaryEvent",
+      "severity": 4,
+      "severity_name": "High",
+      "tactic": "Execution",
+      "technique": "T1059",
+      "computer_name": "WORKSTATION-042",
+      "user_name": "jsmith",
+      "file_name": "suspicious.exe",
+      "file_path": "C:\\Users\\jsmith\\Downloads\\suspicious.exe",
+      "sha256": "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef12345678",
+      "parent_process": "explorer.exe",
+      "command_line": "cmd.exe /c suspicious.exe --payload",
+      "ip_address": "192.168.1.42",
+      "timestamp": "2023-11-20T10:00:00Z"
+    },
+    "expected_classification": "malware_execution",
+    "expected_severity": "High"
+  },
+  {
+    "id": "alert_lateral_1",
+    "description": "Lateral movement - CrowdStrike Critical severity",
+    "alert_data": {
+      "event_type": "DetectionSummaryEvent",
+      "severity": 5,
+      "severity_name": "Critical",
+      "tactic": "LateralMovement",
+      "technique": "T1021",
+      "computer_name": "DC-PRIMARY",
+      "user_name": "admin_svc",
+      "file_name": "psexec.exe",
+      "file_path": "C:\\Windows\\Temp\\psexec.exe",
+      "command_line": "psexec.exe \\\\fileserver01 -u admin_svc -p *** cmd.exe",
+      "ip_address": "10.0.1.5",
+      "timestamp": "2023-11-20T10:05:00Z"
+    },
+    "expected_classification": "lateral_movement",
+    "expected_severity": "Critical"
+  },
+  {
+    "id": "alert_exfil_1",
+    "description": "Data Exfiltration - Splunk Critical severity",
+    "alert_data": {
+      "search_name": "Data Exfiltration Detection",
+      "result": {
+        "source": "firewall",
+        "src_ip": "10.0.1.42",
+        "dest_ip": "198.51.100.77",
+        "dest_port": 443,
+        "bytes_out": 524288000,
+        "user": "jsmith"
+      },
+      "severity": "critical",
+      "description": "500MB outbound transfer to unknown external IP 198.51.100.77"
+    },
+    "expected_classification": "data_exfiltration",
+    "expected_severity": "Critical"
+  },
+  {
+    "id": "alert_phishing_1",
+    "description": "Phishing - Office 365 Medium severity",
+    "alert_data": {
+      "Title": "Phishing email detected post-delivery",
+      "Severity": "Medium",
+      "Category": "Credential Harvesting",
+      "Sender": "admin@paypa1-update.com",
+      "Recipient": "asmith@company.com",
+      "Subject": "Urgent: Your account is suspended",
+      "Attachment": "invoice_update.html",
+      "URL": "http://paypa1-update.com/login"
+    },
+    "expected_classification": "phishing_response",
+    "expected_severity": "Medium"
+  }
+]

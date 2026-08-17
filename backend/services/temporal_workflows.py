@@ -145,6 +145,64 @@ async def response_activity(inputs: Dict[str, Any]) -> Dict[str, Any]:
     return asdict(_agent_report_to_dto(report))
 
 
+@activity.defn(name="persist_investigation_results_activity")
+async def persist_investigation_results_activity(progress_dict: Dict[str, Any]) -> str:
+    """Save the final investigation results to Postgres and Neo4j."""
+    from backend.database.connection import get_db, get_neo4j
+    from backend.database.postgres import InvestigationRecord, RCAResultRecord
+    import contextlib
+    
+    run_id = progress_dict.get("run_id")
+    synthesis = progress_dict.get("synthesis", {})
+    reports = progress_dict.get("completed_reports", {})
+    
+    # 1. Postgres Persistence
+    with contextlib.closing(next(get_db())) as db:
+        # Create Investigation Record
+        inv_record = InvestigationRecord(
+            investigation_id=run_id,
+            status=progress_dict.get("status", "completed"),
+            risk_score=synthesis.get("severity_score", 0.0),
+            raw_events_count=len(reports.get("task-evidence", {}).get("findings", {}).get("raw_events", [])),
+            compressed_events_count=reports.get("task-compression", {}).get("findings", {}).get("compressed_events", 0)
+        )
+        db.add(inv_record)
+        
+        # Save RCA if it exists
+        rca_report = reports.get("task-rca", {})
+        if rca_report and rca_report.get("status") == "completed":
+            rca_record = RCAResultRecord(
+                rca_id=f"rca-{run_id}",
+                investigation_id=run_id,
+                root_cause=rca_report.get("findings", {}).get("root_cause", ""),
+                attack_chain=rca_report.get("findings", {}).get("attack_chain", []),
+                confidence=rca_report.get("confidence", 0.0)
+            )
+            db.add(rca_record)
+            
+        db.commit()
+    
+    # 2. Neo4j Persistence
+    neo4j = get_neo4j()
+    if neo4j:
+        triage = reports.get("task-triage", {})
+        entities = triage.get("findings", {}).get("entities_identified", [])
+        
+        for ent in entities:
+            ent_id = ent.get("id") or ent.get("name")
+            if ent_id:
+                try:
+                    await neo4j.create_entity_node(
+                        entity_id=ent_id,
+                        entity_type=ent.get("type", "unknown"),
+                        attributes={"investigation_id": run_id, "name": ent.get("name")}
+                    )
+                except Exception as e:
+                    # Log but continue
+                    pass
+                
+    return f"Persisted investigation {run_id}"
+
 # Map of activity names to functions (used by the worker to register)
 ALL_ACTIVITIES = [
     triage_activity,
@@ -153,12 +211,9 @@ ALL_ACTIVITIES = [
     compression_activity,
     rca_activity,
     response_activity,
+    persist_investigation_results_activity,
 ]
 
-
-# ============================================================
-# Workflow — durable investigation orchestration
-# ============================================================
 
 @workflow.defn(name="InvestigationWorkflow")
 class InvestigationWorkflow:
@@ -281,6 +336,16 @@ class InvestigationWorkflow:
         self._progress.synthesis = synthesis
         self._progress.completed_at = workflow.now().isoformat()
         self._progress.total_duration_ms = total_duration_ms
+        
+        # Persist the final state
+        try:
+            await workflow.execute_activity(
+                persist_investigation_results_activity,
+                args=[asdict(self._progress)],
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+        except Exception as e:
+            workflow.logger.error(f"Failed to persist investigation results: {e}")
 
         return {
             "run_id": run_id,
