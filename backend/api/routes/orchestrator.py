@@ -32,6 +32,7 @@ class OrchestrationRequest(BaseModel):
     """Request to run a full agentic investigation."""
     task: str = "Investigate security alert"
     alert_data: Dict[str, Any]
+    use_ai_planner: bool = False
 
 
 class InvestigationStartResponse(BaseModel):
@@ -59,6 +60,7 @@ async def investigate(request: OrchestrationRequest):
         workflow_id = await start_investigation(
             task=request.task,
             alert_data=request.alert_data,
+            use_ai_planner=request.use_ai_planner,
         )
         return InvestigationStartResponse(
             workflow_id=workflow_id,
@@ -72,7 +74,9 @@ async def investigate(request: OrchestrationRequest):
         orchestrator = OrchestratorAgent()
 
         async def event_generator():
-            async for event in orchestrator.execute_stream(request.task, request.alert_data):
+            async for event in orchestrator.execute_stream(
+                request.task, request.alert_data, use_ai_planner=request.use_ai_planner
+            ):
                 yield event
 
         return StreamingResponse(
@@ -147,10 +151,23 @@ async def stream_investigation(workflow_id: str):
         last_phase = 0
         last_reports = set()
         last_iteration = 0
+        last_status = "unknown"
 
         while True:
             progress = await get_investigation_status(workflow_id)
             status = progress.get("status", "unknown")
+
+            # Emit plan_created when transitioning from planning to running,
+            # or if we missed the transition (connected after it started running)
+            if status != "planning" and last_status in ["unknown", "planning"]:
+                yield _sse("plan_created", {
+                    "workflow_id": workflow_id,
+                    "reasoning": progress.get("plan_reasoning", ""),
+                    "total_phases": progress.get("total_phases", 0),
+                    "total_tasks": sum(len(p.get("agents", [])) for p in progress.get("phases", [])),
+                    "phases": progress.get("phases", []),
+                })
+            last_status = status
 
             current_phase = progress.get("current_phase", 0)
             completed_reports = progress.get("completed_reports", {})
@@ -209,13 +226,17 @@ async def stream_investigation(workflow_id: str):
                     "total_duration_ms": progress.get("total_duration_ms", 0),
                 })
                 return
-            elif status in ("failed", "unknown"):
+            elif status == "failed":
                 yield _sse("run_error", {
                     "workflow_id": workflow_id,
                     "status": status,
                     "error": progress.get("error", ""),
                 })
                 return
+            elif status == "unknown":
+                # Workflow query timed out (e.g. event loop blocked), just wait and retry
+                await asyncio.sleep(1.0)
+                continue
 
             await asyncio.sleep(0.5)
 
