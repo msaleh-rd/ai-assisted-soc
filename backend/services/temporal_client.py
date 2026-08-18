@@ -35,6 +35,7 @@ async def start_investigation(
     task: str,
     alert_data: Dict[str, Any],
     workflow_id: Optional[str] = None,
+    use_ai_planner: bool = False,
 ) -> str:
     """
     Start a new InvestigationWorkflow.
@@ -46,7 +47,7 @@ async def start_investigation(
     if workflow_id is None:
         workflow_id = f"soc-investigation-{uuid.uuid4().hex[:12]}"
 
-    input_data = InvestigationInput(task=task, alert_data=alert_data)
+    input_data = InvestigationInput(task=task, alert_data=alert_data, use_ai_planner=use_ai_planner)
 
     handle = await client.start_workflow(
         InvestigationWorkflow.run,
@@ -55,7 +56,7 @@ async def start_investigation(
         task_queue=TASK_QUEUE,
     )
 
-    logger.info("Started investigation workflow: %s", workflow_id)
+    logger.info("Started investigation workflow: %s (ai_planner=%s)", workflow_id, use_ai_planner)
     return workflow_id
 
 

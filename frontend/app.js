@@ -13,6 +13,8 @@ document.querySelectorAll('.nav-item').forEach(item => {
         
         if (page === 'approvals') {
             loadPendingApprovals();
+        } else if (page === 'history') {
+            loadInvestigationHistory();
         }
     });
 });
@@ -1290,7 +1292,10 @@ function addPendingApproval(workflowId, actions = [], confidence = 0, entities =
     card.className = 'agent-card';
     card.id = `approval-${workflowId}`;
     
-    let actionsHtml = actions.map(a => `<li>${a}</li>`).join('');
+    let actionsHtml = actions.map(a => {
+        if (typeof a === 'string') return `<li>${a}</li>`;
+        return `<li><strong>[${(a.action_type || 'UNKNOWN').toUpperCase()}]</strong> Target: <code>${a.target || 'Unknown'}</code><br><span style="font-size: 0.85em; color: var(--text-muted)">${a.description || ''}</span></li>`;
+    }).join('');
     let entitiesHtml = entities.map(e => `<span class="badge" style="margin-right:5px; background:var(--bg-lighter)">${e.id} (${e.type})</span>`).join('');
     
     card.innerHTML = `
@@ -1339,4 +1344,155 @@ async function loadPendingApprovals() {
     } catch (e) {
         console.error("Failed to load pending approvals", e);
     }
+}
+
+// --- Investigation History ---
+async function loadInvestigationHistory() {
+    try {
+        const tbody = document.getElementById('historyTableBody');
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 20px; color: var(--text-muted);">Loading...</td></tr>';
+        
+        // Hide details panel if it's open
+        document.getElementById('historyDetailsPanel').style.display = 'none';
+
+        const res = await apiFetch('/api/v3/orchestrator/investigations');
+        if (res.ok) {
+            window._cachedInvestigations = res.data.investigations || []; // cache for later
+            const investigations = window._cachedInvestigations;
+            
+            if (investigations.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 20px; color: var(--text-muted);">No past investigations found.</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = '';
+            investigations.forEach(inv => {
+                const tr = document.createElement('tr');
+                tr.style.borderBottom = '1px solid #334155';
+                
+                const synth = inv.synthesis || {};
+                const startDateStr = inv.started_at || inv.start_time;
+                const date = startDateStr ? new Date(startDateStr).toLocaleString() : 'Unknown';
+                
+                let confidence = 'FETCHING...';
+                let severity = 'FETCHING...';
+                let durationStr = 'FETCHING...';
+                
+                if (inv.synthesis) {
+                    // In-memory format has synthesis right away
+                    confidence = synth.confidence !== undefined ? Math.round(synth.confidence * 100) + '%' : 'N/A';
+                    severity = synth.severity || 'Unknown';
+                    durationStr = inv.total_duration_ms ? (inv.total_duration_ms / 1000).toFixed(1) + 's' : 'N/A';
+                } else if (inv.status === 'running') {
+                    confidence = 'PENDING';
+                    severity = 'PENDING';
+                    durationStr = 'running';
+                }
+                
+                const verdict = synth.verdict || inv.status;
+                
+                let severityBadge = 'badge-blue';
+                if (severity.toLowerCase() === 'high' || severity.toLowerCase() === 'critical') severityBadge = 'badge-red';
+                else if (severity.toLowerCase() === 'medium') severityBadge = 'badge-purple';
+                else if (severity === 'FETCHING...' || severity === 'PENDING') severityBadge = '';
+                
+                tr.innerHTML = `
+                    <td style="padding: 12px 8px; font-family: monospace;">${inv.workflow_id}</td>
+                    <td style="padding: 12px 8px;">${date}</td>
+                    <td style="padding: 12px 8px;">${severityBadge ? `<span class="badge ${severityBadge}">${severity}</span>` : `<span style="color:var(--text-muted);font-size:0.8rem">${severity}</span>`}</td>
+                    <td style="padding: 12px 8px; max-width: 250px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${verdict}">${verdict}</td>
+                    <td style="padding: 12px 8px;">${durationStr}</td>
+                    <td style="padding: 12px 8px;">${confidence}</td>
+                    <td style="padding: 12px 8px;"><button class="btn btn-sm" onclick="viewInvestigationDetails('${inv.workflow_id}')">View</button></td>
+                `;
+                tbody.appendChild(tr);
+            });
+        } else {
+            tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 20px; color: var(--accent-red);">Error loading history: ${res.status}</td></tr>`;
+        }
+    } catch (e) {
+        console.error("Failed to load investigation history", e);
+        document.getElementById('historyTableBody').innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 20px; color: var(--accent-red);">Error: ${e.message}</td></tr>`;
+    }
+}
+
+async function viewInvestigationDetails(workflowId) {
+    const panel = document.getElementById('historyDetailsPanel');
+    const content = document.getElementById('historyDetailsContent');
+    const title = document.getElementById('historyDetailsTitle');
+    
+    panel.style.display = 'block';
+    title.textContent = `Investigation Details: ${workflowId}`;
+    content.innerHTML = '<div style="color: var(--text-muted);">Fetching details...</div>';
+    
+    // Scroll to panel
+    panel.scrollIntoView({ behavior: 'smooth' });
+    
+    // First, check if it's an in-memory workflow we already have
+    let inv = (window._cachedInvestigations || []).find(i => i.workflow_id === workflowId);
+    
+    if (inv && inv.status === 'running') {
+        content.innerHTML = '<div style="color: var(--accent-blue);">This investigation is still running. Please wait for it to complete.</div>';
+        return;
+    }
+    
+    let synthesis = null;
+    
+    if (inv && inv.synthesis) {
+        // It's the in-memory version
+        synthesis = inv.synthesis;
+    } else {
+        // It's likely Temporal, let's fetch the full result
+        try {
+            const res = await apiFetch(`/api/v3/orchestrator/investigate/${workflowId}/result`);
+            if (res.ok) {
+                synthesis = res.data.synthesis;
+                
+                // If the backend returned a wrapper or the exact object
+                if (!synthesis && res.data.verdict) {
+                    synthesis = res.data;
+                }
+            } else {
+                content.innerHTML = `<div style="color: var(--accent-red);">Failed to fetch details: ${res.status}</div>`;
+                return;
+            }
+        } catch (e) {
+            content.innerHTML = `<div style="color: var(--accent-red);">Error fetching details: ${e.message}</div>`;
+            return;
+        }
+    }
+    
+    if (!synthesis) {
+        content.innerHTML = '<div style="color: var(--text-muted);">No synthesis data available for this investigation.</div>';
+        return;
+    }
+    
+    // Render the synthesis data cleanly
+    const actionsHtml = (synthesis.recommended_actions || []).map(a => {
+        if (typeof a === 'string') return `<li>${a}</li>`;
+        return `<li><strong>[${(a.action_type || 'UNKNOWN').toUpperCase()}]</strong> Target: <code>${a.target || 'Unknown'}</code> - ${a.description || ''}</li>`;
+    }).join('');
+    
+    content.innerHTML = `
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+            <div style="background: var(--bg-darker); padding: 15px; border-radius: 4px;">
+                <h4 style="margin-top:0; color: var(--text-muted); text-transform: uppercase; font-size: 0.8rem;">Executive Summary</h4>
+                <div style="font-size: 1.1rem; line-height: 1.5;">${synthesis.executive_summary || synthesis.verdict || 'N/A'}</div>
+            </div>
+            <div style="background: var(--bg-darker); padding: 15px; border-radius: 4px;">
+                <h4 style="margin-top:0; color: var(--text-muted); text-transform: uppercase; font-size: 0.8rem;">Root Cause</h4>
+                <div>${synthesis.root_cause || 'Not identified'}</div>
+            </div>
+        </div>
+        
+        <div style="background: var(--bg-darker); padding: 15px; border-radius: 4px; border-left: 3px solid var(--accent-red); margin-bottom: 20px;">
+            <h4 style="margin-top:0; color: var(--accent-red);">Recommended Actions</h4>
+            ${actionsHtml ? `<ul style="margin: 0; padding-left: 20px;">${actionsHtml}</ul>` : 'No actions recommended.'}
+        </div>
+        
+        <div>
+            <h4 style="color: var(--text-muted); margin-bottom: 10px;">Raw Synthesis Data</h4>
+            <pre class="code-input" style="font-size: 0.85rem; padding: 10px; max-height: 300px; overflow-y: auto;">${JSON.stringify(synthesis, null, 2)}</pre>
+        </div>
+    `;
 }

@@ -11,7 +11,9 @@ import asyncio
 import json
 import os
 import logging
-from typing import Dict, Any, Optional
+import uuid
+from datetime import datetime
+from typing import Dict, Any, Optional, List
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -22,6 +24,7 @@ router = APIRouter(prefix="/api/v3/orchestrator", tags=["Orchestrator - Agentic 
 logger = logging.getLogger("orchestrator-api")
 
 USE_TEMPORAL = os.getenv("USE_TEMPORAL", "false").lower() in ("true", "1", "yes")
+IN_MEMORY_INVESTIGATIONS: List[Dict[str, Any]] = []
 
 
 # -----------------------------------------------------------------------
@@ -74,9 +77,37 @@ async def investigate(request: OrchestrationRequest):
         orchestrator = OrchestratorAgent()
 
         async def event_generator():
+            inv_id = f"inv-{uuid.uuid4().hex[:8]}"
+            investigation_record = {
+                "workflow_id": inv_id,
+                "task": request.task,
+                "status": "running",
+                "started_at": datetime.utcnow().isoformat(),
+                "synthesis": None,
+                "total_duration_ms": 0
+            }
+            
             async for event in orchestrator.execute_stream(
                 request.task, request.alert_data, use_ai_planner=request.use_ai_planner
             ):
+                # We need to peek inside the SSE string to see if the run completed
+                try:
+                    lines = event.strip().split('\n')
+                    is_complete = False
+                    for line in lines:
+                        if line == "event: run_complete":
+                            is_complete = True
+                        elif is_complete and line.startswith("data: "):
+                            data = json.loads(line[6:])
+                            investigation_record["status"] = "completed"
+                            investigation_record["synthesis"] = data.get("synthesis")
+                            investigation_record["total_duration_ms"] = data.get("total_duration_ms", 0)
+                            investigation_record["completed_at"] = datetime.utcnow().isoformat()
+                            IN_MEMORY_INVESTIGATIONS.insert(0, investigation_record) # Insert at beginning
+                            break
+                except Exception:
+                    pass
+                    
                 yield event
 
         return StreamingResponse(
@@ -254,15 +285,12 @@ async def stream_investigation(workflow_id: str):
 @router.get("/investigations")
 async def list_investigations():
     """
-    List recent investigation workflows from Temporal.
+    List recent investigation workflows.
 
-    Only available in Temporal mode.
+    Works in both Temporal mode and in-memory mode.
     """
     if not USE_TEMPORAL:
-        raise HTTPException(
-            status_code=400,
-            detail="Temporal mode is not enabled. Set USE_TEMPORAL=true to use this endpoint.",
-        )
+        return {"investigations": IN_MEMORY_INVESTIGATIONS, "count": len(IN_MEMORY_INVESTIGATIONS)}
 
     from backend.services.temporal_client import list_investigations as fetch_list
     investigations = await fetch_list(limit=50)

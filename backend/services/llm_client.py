@@ -13,6 +13,7 @@ MODEL_ROUTING = {
     "triage": os.getenv("LLM_TRIAGE_MODEL", DEFAULT_MODEL),
     "rca": os.getenv("LLM_RCA_MODEL", DEFAULT_MODEL),
     "response": os.getenv("LLM_RESPONSE_MODEL", DEFAULT_MODEL),
+    "planner": os.getenv("LLM_PLANNER_MODEL", DEFAULT_MODEL),
 }
 
 def get_llm(role: str = "default"):
@@ -43,6 +44,19 @@ class Entity(BaseModel):
     type: str = Field(description="Type of entity, e.g., 'user', 'host', 'ip', 'file', 'process', 'domain'")
     id: str = Field(description="The unique identifier or value of the entity")
 
+
+class PlannerTask(BaseModel):
+    """A single task in the AI planner's output."""
+    id: str = Field(description="Unique task ID, e.g. 'task-triage', 'task-evidence'")
+    agent_name: str = Field(description="The exact agent name from the registry, e.g. 'triage_agent'")
+    description: str = Field(description="Brief description of what this agent will do for this alert")
+
+
+class PlannerOutput(BaseModel):
+    """Structured output from the AI investigation planner."""
+    phases: List[List[PlannerTask]] = Field(description="Ordered list of phases. Each phase is a list of tasks that can run in parallel.")
+    reasoning: str = Field(description="Explanation of why this plan was chosen for the given alert")
+
 class TriageOutput(BaseModel):
     """Schema for the TriageAgent's structured output."""
     severity: str = Field(description="Severity level: 'Critical', 'High', 'Medium', 'Low'")
@@ -62,8 +76,36 @@ class RCAOutput(BaseModel):
     confidence: float = Field(description="Confidence score between 0.0 and 1.0 in this analysis")
 
 
+class ActionItem(BaseModel):
+    action_type: str = Field(description="Must be exactly one of: isolate_host, reset_credentials, block_ip, block_domain, kill_process, revoke_mfa, disable_account, patch_system, enable_mfa, update_firewall")
+    target: str = Field(description="The specific IP, hostname, or username to target for this action, extracted from the entities")
+    description: str = Field(description="The full verbatim description of the action from the playbook")
+    priority: str = Field(description="The priority of the action, usually 'Critical', 'High', 'Medium', or 'Low'")
+
 class ResponseOutput(BaseModel):
     """Schema for the ResponsePlannerAgent's structured output."""
-    actions_recommended: List[str] = Field(description="List of exact actionable steps extracted from UNDER the 'Containment Actions' and 'Eradication & Recovery' headers. You MUST extract the ENTIRE sentence for each step, not just the bolded titles.")
+    actions_recommended: List[ActionItem] = Field(description="List of structured response actions to take")
     critical_actions: int = Field(description="The exact number of actions extracted that are marked as '(Priority: Critical)' in the playbook.")
     summary: str = Field(description="A brief summary explaining why these specific playbook steps apply to this incident.")
+
+def verify_entities(entities: List[Entity], context_text: str) -> List[Entity]:
+    """
+    Hallucination Detection:
+    Validates that the IDs of the extracted entities actually exist in the source context.
+    Returns only the entities that can be grounded in the context.
+    """
+    valid_entities = []
+    # Make context search case-insensitive to be safe
+    context_lower = str(context_text).lower()
+    
+    for entity in entities:
+        # Check if the entity ID string exists in the raw context
+        if str(entity.id).lower() in context_lower:
+            valid_entities.append(entity)
+        else:
+            import logging
+            logging.getLogger("llm_client").warning(
+                f"Hallucination detected: Entity {entity.id} ({entity.type}) not found in context. Dropping."
+            )
+            
+    return valid_entities

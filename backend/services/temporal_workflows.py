@@ -42,6 +42,7 @@ class InvestigationInput:
     """Input payload for an investigation workflow."""
     task: str
     alert_data: Dict[str, Any]
+    use_ai_planner: bool = False
 
 
 @dataclass
@@ -91,6 +92,46 @@ def _agent_report_to_dto(report) -> AgentReportDTO:
         artifacts=report.artifacts,
         error=report.error,
     )
+
+
+# Map from agent registry names → Temporal activity names
+AGENT_TO_ACTIVITY = {
+    "triage_agent": "triage_activity",
+    "evidence_agent": "evidence_activity",
+    "discovery_agent": "discovery_activity",
+    "compression_agent": "compression_activity",
+    "rca_agent": "rca_activity",
+    "response_agent": "response_activity",
+}
+
+
+@activity.defn(name="planner_activity")
+async def planner_activity(alert_data: Dict[str, Any]) -> List[List[Dict]]:
+    """Run the AI Planner to generate a dynamic execution plan.
+    
+    Returns a plan in the same shape as _build_plan():
+    List[List[Dict]] where each Dict has id, agent, activity, description.
+    """
+    from backend.services.orchestrator import OrchestratorAgent
+    agent = OrchestratorAgent()
+    plan = await agent.plan("Investigate security alert", alert_data, use_ai_planner=True)
+
+    temporal_plan = []
+    for phase in plan.phases:
+        temporal_phase = []
+        for task in phase:
+            activity_name = AGENT_TO_ACTIVITY.get(task.agent_name)
+            if not activity_name:
+                continue
+            temporal_phase.append({
+                "id": task.id,
+                "agent": task.agent_name,
+                "activity": activity_name,
+                "description": task.description,
+            })
+        if temporal_phase:
+            temporal_plan.append(temporal_phase)
+    return temporal_plan
 
 
 @activity.defn(name="triage_activity")
@@ -243,12 +284,18 @@ async def execute_response_activity(run_id: str, response_report: Dict[str, Any]
         long_term_remediation: List[Any]
         
     actions = []
-    for action_text in findings.get("actions_recommended", []):
+    actions = []
+    for item in findings.get("actions_recommended", []):
+        try:
+            action_enum = ResponseAction(item.get("action_type", "isolate_host"))
+        except ValueError:
+            action_enum = ResponseAction.ISOLATE_HOST
+            
         actions.append(ResponsePlanAction(
-            action=ResponseAction.ISOLATE_HOST, # Default mock
-            target="Unknown",
-            description=action_text,
-            priority="high",
+            action=action_enum,
+            target=item.get("target", "Unknown"),
+            description=item.get("description", "No description provided"),
+            priority=item.get("priority", "high").lower(),
             business_impact="medium",
             prerequisites=[]
         ))
@@ -282,6 +329,7 @@ async def execute_response_activity(run_id: str, response_report: Dict[str, Any]
 
 # Map of activity names to functions (used by the worker to register)
 ALL_ACTIVITIES = [
+    planner_activity,
     triage_activity,
     evidence_activity,
     discovery_activity,
@@ -338,17 +386,31 @@ class InvestigationWorkflow:
         self._progress.status = "planning"
         self._progress.started_at = run_start.isoformat()
 
-        # ---- PLANNING (deterministic, no IO) ----
-        plan = self._build_plan(input.alert_data)
+        # ---- PLANNING ----
+        if input.use_ai_planner:
+            # AI Planner: call the planner activity to get a dynamic plan
+            plan = await workflow.execute_activity(
+                "planner_activity",
+                args=[input.alert_data],
+                start_to_close_timeout=timedelta(seconds=90),
+                retry_policy=RetryPolicy(
+                    initial_interval=timedelta(seconds=2),
+                    maximum_attempts=2,
+                ),
+            )
+            self._progress.plan_reasoning = "Generated dynamically by AI Planner based on alert context."
+        else:
+            # Static plan (deterministic, no IO)
+            plan = self._build_plan(input.alert_data)
+            self._progress.plan_reasoning = (
+                "1) Triage first to understand severity and extract entities. "
+                "2) Evidence collection and network discovery run in PARALLEL. "
+                "3) Compression needs evidence data, so it waits. "
+                "4) RCA needs both compressed evidence AND network context. "
+                "5) Response planning depends on root cause identification."
+            )
 
         self._progress.total_phases = len(plan)
-        self._progress.plan_reasoning = (
-            "1) Triage first to understand severity and extract entities. "
-            "2) Evidence collection and network discovery run in PARALLEL. "
-            "3) Compression needs evidence data, so it waits. "
-            "4) RCA needs both compressed evidence AND network context. "
-            "5) Response planning depends on root cause identification."
-        )
         self._progress.phases = [
             {
                 "phase_num": i + 1,
@@ -371,55 +433,35 @@ class InvestigationWorkflow:
             maximum_interval=timedelta(seconds=30),
         )
 
-        # Phase 1: Triage
-        phase_idx = 0
-        self._progress.current_phase = 1
-        self._progress.phases[phase_idx]["status"] = "running"
-        task_def = plan[phase_idx][0]
-        result = await workflow.execute_activity(
-            task_def["activity"],
-            args=[context_dict],
-            start_to_close_timeout=timedelta(seconds=60),
-            retry_policy=retry_policy,
-        )
-        context_dict = result["context"]
-        all_reports[task_def["id"]] = result["report"]
-        self._progress.completed_reports[task_def["id"]] = result["report"]
-        self._progress.phases[phase_idx]["status"] = "completed"
+        if input.use_ai_planner:
+            # ---- DYNAMIC EXECUTION (AI Planner path) ----
+            # Generic loop over however many phases the AI planned
+            for phase_idx, phase in enumerate(plan):
+                self._progress.current_phase = phase_idx + 1
+                self._progress.phases[phase_idx]["status"] = "running"
 
-        # Adaptive Loop for Phases 2, 3, 4
-        looping = True
-        while looping:
-            ctx_obj = InvestigationContext.from_dict(context_dict)
-            ctx_obj.confidence_history.append(ctx_obj.rca_findings.get("confidence_score", 0.0))
-            context_dict = ctx_obj.to_dict()
-
-            # Phase 2: Evidence + Discovery
-            phase_idx = 1
-            self._progress.current_phase = 2
-            self._progress.phases[phase_idx]["status"] = "running"
-            
-            results = await asyncio.gather(
-                *[
-                    workflow.execute_activity(
-                        td["activity"],
-                        args=[context_dict],
-                        start_to_close_timeout=timedelta(seconds=60),
-                        retry_policy=retry_policy,
-                    )
-                    for td in plan[phase_idx]
-                ]
-            )
-            for td, res in zip(plan[phase_idx], results):
-                if td["id"] == "task-evidence":
+                results = await asyncio.gather(
+                    *[
+                        workflow.execute_activity(
+                            td["activity"],
+                            args=[context_dict],
+                            start_to_close_timeout=timedelta(seconds=60),
+                            retry_policy=retry_policy,
+                        )
+                        for td in phase
+                    ]
+                )
+                for td, res in zip(phase, results):
                     context_dict = res["context"]
-                all_reports[td["id"]] = res["report"]
-                self._progress.completed_reports[td["id"]] = res["report"]
-            self._progress.phases[phase_idx]["status"] = "completed"
+                    all_reports[td["id"]] = res["report"]
+                    self._progress.completed_reports[td["id"]] = res["report"]
+                self._progress.phases[phase_idx]["status"] = "completed"
 
-            # Phase 3: Compression
-            phase_idx = 2
-            self._progress.current_phase = 3
+        else:
+            # ---- STATIC EXECUTION (Legacy adaptive loop) ----
+            # Phase 1: Triage
+            phase_idx = 0
+            self._progress.current_phase = 1
             self._progress.phases[phase_idx]["status"] = "running"
             task_def = plan[phase_idx][0]
             result = await workflow.execute_activity(
@@ -433,50 +475,96 @@ class InvestigationWorkflow:
             self._progress.completed_reports[task_def["id"]] = result["report"]
             self._progress.phases[phase_idx]["status"] = "completed"
 
-            # Phase 4: RCA
-            phase_idx = 3
-            self._progress.current_phase = 4
-            self._progress.phases[phase_idx]["status"] = "running"
-            task_def = plan[phase_idx][0]
-            result = await workflow.execute_activity(
-                task_def["activity"],
-                args=[context_dict],
-                start_to_close_timeout=timedelta(seconds=60),
-                retry_policy=retry_policy,
-            )
-            context_dict = result["context"]
-            all_reports[task_def["id"]] = result["report"]
-            self._progress.completed_reports[task_def["id"]] = result["report"]
-            self._progress.phases[phase_idx]["status"] = "completed"
-
-            # Adaptive Loop Check
-            ctx_obj = InvestigationContext.from_dict(context_dict)
-            self._progress.iteration = ctx_obj.iteration
-            self._progress.confidence_history = ctx_obj.confidence_history
-            self._progress.messages = [m.to_dict() for m in ctx_obj.messages]
-            
-            if ctx_obj.needs_reinvestigation():
-                ctx_obj.iteration += 1
-                self._progress.iteration = ctx_obj.iteration
+            # Adaptive Loop for Phases 2, 3, 4
+            looping = True
+            while looping:
+                ctx_obj = InvestigationContext.from_dict(context_dict)
+                ctx_obj.confidence_history.append(ctx_obj.rca_findings.get("confidence_score", 0.0))
                 context_dict = ctx_obj.to_dict()
-            else:
-                looping = False
 
-        # Phase 5: Response
-        phase_idx = 4
-        self._progress.current_phase = 5
-        self._progress.phases[phase_idx]["status"] = "running"
-        task_def = plan[phase_idx][0]
-        result = await workflow.execute_activity(
-            task_def["activity"],
-            args=[context_dict],
-            start_to_close_timeout=timedelta(seconds=60),
-            retry_policy=retry_policy,
-        )
-        context_dict = result["context"]
-        all_reports[task_def["id"]] = result["report"]
-        self._progress.completed_reports[task_def["id"]] = result["report"]
-        self._progress.phases[phase_idx]["status"] = "completed"
+                # Phase 2: Evidence + Discovery
+                phase_idx = 1
+                self._progress.current_phase = 2
+                self._progress.phases[phase_idx]["status"] = "running"
+                
+                results = await asyncio.gather(
+                    *[
+                        workflow.execute_activity(
+                            td["activity"],
+                            args=[context_dict],
+                            start_to_close_timeout=timedelta(seconds=60),
+                            retry_policy=retry_policy,
+                        )
+                        for td in plan[phase_idx]
+                    ]
+                )
+                for td, res in zip(plan[phase_idx], results):
+                    if td["id"] == "task-evidence":
+                        context_dict = res["context"]
+                    all_reports[td["id"]] = res["report"]
+                    self._progress.completed_reports[td["id"]] = res["report"]
+                self._progress.phases[phase_idx]["status"] = "completed"
+
+                # Phase 3: Compression
+                phase_idx = 2
+                self._progress.current_phase = 3
+                self._progress.phases[phase_idx]["status"] = "running"
+                task_def = plan[phase_idx][0]
+                result = await workflow.execute_activity(
+                    task_def["activity"],
+                    args=[context_dict],
+                    start_to_close_timeout=timedelta(seconds=60),
+                    retry_policy=retry_policy,
+                )
+                context_dict = result["context"]
+                all_reports[task_def["id"]] = result["report"]
+                self._progress.completed_reports[task_def["id"]] = result["report"]
+                self._progress.phases[phase_idx]["status"] = "completed"
+
+                # Phase 4: RCA
+                phase_idx = 3
+                self._progress.current_phase = 4
+                self._progress.phases[phase_idx]["status"] = "running"
+                task_def = plan[phase_idx][0]
+                result = await workflow.execute_activity(
+                    task_def["activity"],
+                    args=[context_dict],
+                    start_to_close_timeout=timedelta(seconds=60),
+                    retry_policy=retry_policy,
+                )
+                context_dict = result["context"]
+                all_reports[task_def["id"]] = result["report"]
+                self._progress.completed_reports[task_def["id"]] = result["report"]
+                self._progress.phases[phase_idx]["status"] = "completed"
+
+                # Adaptive Loop Check
+                ctx_obj = InvestigationContext.from_dict(context_dict)
+                self._progress.iteration = ctx_obj.iteration
+                self._progress.confidence_history = ctx_obj.confidence_history
+                self._progress.messages = [m.to_dict() for m in ctx_obj.messages]
+                
+                if ctx_obj.needs_reinvestigation():
+                    ctx_obj.iteration += 1
+                    self._progress.iteration = ctx_obj.iteration
+                    context_dict = ctx_obj.to_dict()
+                else:
+                    looping = False
+
+            # Phase 5: Response
+            phase_idx = 4
+            self._progress.current_phase = 5
+            self._progress.phases[phase_idx]["status"] = "running"
+            task_def = plan[phase_idx][0]
+            result = await workflow.execute_activity(
+                task_def["activity"],
+                args=[context_dict],
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=retry_policy,
+            )
+            context_dict = result["context"]
+            all_reports[task_def["id"]] = result["report"]
+            self._progress.completed_reports[task_def["id"]] = result["report"]
+            self._progress.phases[phase_idx]["status"] = "completed"
 
         # ---- SYNTHESIS ----
         synthesis = self._synthesize(all_reports, InvestigationContext.from_dict(context_dict))
@@ -598,7 +686,8 @@ class InvestigationWorkflow:
         severity = triage.get("severity", "Unknown")
         root_cause = rca.get("root_cause", "Undetermined")
         confidence = rca.get("confidence_score", 0)
-        total_actions = response.get("total_actions", 0)
+        recommended_actions = response.get("actions_recommended", [])
+        total_actions = len(recommended_actions)
         compression_ratio = compression.get("compression_ratio", "N/A")
         blast_radius = rca.get("blast_radius", 0)
 
@@ -619,6 +708,7 @@ class InvestigationWorkflow:
             "blast_radius": blast_radius,
             "compression_ratio": compression_ratio,
             "response_actions": total_actions,
+            "recommended_actions": recommended_actions,
             "agents_used": len(reports),
             "all_succeeded": all(
                 r.get("status") == "completed" for r in reports.values()

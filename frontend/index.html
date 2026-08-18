@@ -52,8 +52,11 @@
             <li class="nav-item" data-page="discovery">
                 <span class="nav-icon">&#128752;</span> Network Discovery
             </li>
-            <li class="nav-item" data-page="orchestrator">
+            <li class="nav-item active" data-page="orchestrator">
                 <span class="nav-icon">&#129302;</span> Agent Orchestrator
+            </li>
+            <li class="nav-item" data-page="history">
+                <span class="nav-icon">&#128193;</span> Investigation History
             </li>
             <li class="nav-section">System</li>
             <li class="nav-item" data-page="demo">
@@ -436,6 +439,53 @@
                 <p class="description">The AI has recommended containment actions that require human authorization before execution.</p>
                 <div id="approvalsList">
                     <div style="color: var(--text-muted); font-style: italic;">No pending approvals at this time.</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Investigation History -->
+        <div class="page" id="page-history">
+            <div class="page-header">
+                <h1>Investigation History</h1>
+                <span class="badge badge-purple">TOOLS</span>
+            </div>
+            
+            <div class="panel">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                    <h3>Past Investigations</h3>
+                    <button class="btn btn-sm btn-primary" onclick="loadInvestigationHistory()">Refresh List</button>
+                </div>
+                
+                <div class="table-responsive">
+                    <table class="data-table" id="historyTable" style="width: 100%; text-align: left; border-collapse: collapse;">
+                        <thead>
+                            <tr style="border-bottom: 1px solid #334155;">
+                                <th style="padding: 12px 8px;">ID</th>
+                                <th style="padding: 12px 8px;">Date</th>
+                                <th style="padding: 12px 8px;">Severity</th>
+                                <th style="padding: 12px 8px;">Verdict</th>
+                                <th style="padding: 12px 8px;">Duration</th>
+                                <th style="padding: 12px 8px;">Confidence</th>
+                                <th style="padding: 12px 8px;">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="historyTableBody">
+                            <tr>
+                                <td colspan="7" style="text-align: center; padding: 20px; color: #94a3b8;">Click Refresh to load history</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <!-- Details Panel -->
+            <div class="panel" id="historyDetailsPanel" style="display: none; margin-top: 20px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 10px; margin-bottom: 15px;">
+                    <h3 id="historyDetailsTitle" style="margin: 0;">Investigation Details</h3>
+                    <button class="btn btn-sm" onclick="document.getElementById('historyDetailsPanel').style.display='none'">Close</button>
+                </div>
+                <div id="historyDetailsContent">
+                    <!-- Dynamic content will be injected here -->
                 </div>
             </div>
         </div>

@@ -117,7 +117,7 @@ class TriageAgent(BaseAgent):
         start = time.time()
         alert = context.alert_data
 
-        from backend.services.llm_client import get_llm, TriageOutput
+        from backend.services.llm_client import get_llm, TriageOutput, verify_entities
         from backend.services.prompt_manager import prompt_manager
         import json
         
@@ -131,9 +131,19 @@ class TriageAgent(BaseAgent):
         try:
             result = await structured_llm.ainvoke(prompt)
             findings = result.model_dump()
-            findings["entity_count"] = len(findings.get("entities_identified", []))
+            
+            # Ground entities against the original alert text
+            raw_alert_text = json.dumps(alert)
+            # The result object still has Entity models, verify them
+            valid_entity_models = verify_entities(result.entities_identified, raw_alert_text)
+            
+            # Convert back to dicts for findings
+            findings["entities_identified"] = [e.model_dump() for e in valid_entity_models]
+            findings["entity_count"] = len(findings["entities_identified"])
             findings["prompt_version"] = prompt_manager.get_prompt_metadata("triage")["version"]
-            confidence = 0.95
+            
+            # Only 0.95 confidence if we found grounded entities
+            confidence = 0.95 if findings["entity_count"] > 0 else 0.50
             
             # Update context
             context.entities = findings.get("entities_identified", [])
@@ -461,7 +471,9 @@ class ResponsePlannerAgent(BaseAgent):
         # 1. RAG Step: Retrieve playbook using section-aware search
         try:
             query = f"root cause: {root_cause} | attack chain: {attack_chain}"
-            docs = search_playbook(query=query, classification=classification)
+            # Run the synchronous search_playbook in a thread to avoid blocking the asyncio event loop
+            import asyncio
+            docs = await asyncio.to_thread(search_playbook, query=query, classification=classification)
             
             # Combine the content of the top retrieved chunks
             playbook_context = "\n\n".join([doc.page_content for doc in docs]) if docs else "No specific playbook found."
@@ -531,10 +543,66 @@ class OrchestratorAgent:
     def __init__(self):
         self.agents = AGENT_REGISTRY
 
-    def plan(self, task: str, alert_data: Dict[str, Any]) -> ExecutionPlan:
-        """Create an execution plan for the given task."""
+    async def plan(self, task: str, alert_data: Dict[str, Any], use_ai_planner: bool = False) -> ExecutionPlan:
+        """Create an execution plan for the given task.
+        
+        When use_ai_planner=True, consults the LLM to dynamically select agents.
+        Falls back to the static plan on failure or when use_ai_planner=False.
+        """
         plan_id = f"plan-{uuid.uuid4().hex[:8]}"
 
+        if use_ai_planner:
+            try:
+                from backend.services.llm_client import get_llm, PlannerOutput
+                from backend.services.prompt_manager import prompt_manager
+                import json
+                import logging
+                _log = logging.getLogger("orchestrator")
+
+                llm = get_llm(role="planner")
+                structured_llm = llm.with_structured_output(PlannerOutput)
+                system_prompt = prompt_manager.get_system_prompt("planner")
+                user_prompt = prompt_manager.build_user_prompt(
+                    "planner", alert_json=json.dumps(alert_data, indent=2)
+                )
+
+                result = await structured_llm.ainvoke(f"{system_prompt}\n\n{user_prompt}")
+
+                # Validate: every agent_name must exist in the registry
+                valid_agents = set(self.agents.keys())
+                phases = []
+                for phase_tasks in result.phases:
+                    phase = []
+                    for t in phase_tasks:
+                        if t.agent_name not in valid_agents:
+                            _log.warning("AI Planner referenced unknown agent '%s' — skipping", t.agent_name)
+                            continue
+                        phase.append(SubTask(
+                            id=t.id,
+                            agent_name=t.agent_name,
+                            description=t.description,
+                        ))
+                    if phase:
+                        phases.append(phase)
+
+                if phases:
+                    _log.info("AI Planner generated %d phases with %d total tasks",
+                              len(phases), sum(len(p) for p in phases))
+                    return ExecutionPlan(
+                        plan_id=plan_id,
+                        objective=task,
+                        phases=phases,
+                        reasoning=result.reasoning,
+                    )
+                else:
+                    _log.warning("AI Planner produced an empty plan — falling back to static")
+            except Exception as e:
+                import logging
+                logging.getLogger("orchestrator").error(
+                    "AI Planner failed, falling back to static plan: %s", e
+                )
+
+        # --- Static Plan (default / fallback) ---
         # Phase 1: Triage (must run first)
         triage_task = SubTask(
             id="task-triage",
@@ -600,7 +668,7 @@ class OrchestratorAgent:
         )
         return plan
 
-    async def execute_stream(self, task: str, alert_data: Dict[str, Any]) -> AsyncGenerator[str, None]:
+    async def execute_stream(self, task: str, alert_data: Dict[str, Any], use_ai_planner: bool = False) -> AsyncGenerator[str, None]:
         """Execute the plan and yield SSE events for each step."""
         run_id = f"run-{uuid.uuid4().hex[:8]}"
         run_start = time.time()
@@ -617,7 +685,7 @@ class OrchestratorAgent:
 
         await asyncio.sleep(0.2)  # Brief pause so UI sees planning state
 
-        plan = self.plan(task, alert_data)
+        plan = await self.plan(task, alert_data, use_ai_planner=use_ai_planner)
 
         yield sse_event("plan_created", {
             "run_id": run_id,
@@ -630,6 +698,7 @@ class OrchestratorAgent:
                 {
                     "phase_num": i + 1,
                     "parallel": len(phase) > 1,
+                    "agents": [t.agent_name for t in phase],
                     "tasks": [
                         {
                             "id": t.id,
@@ -761,7 +830,8 @@ class OrchestratorAgent:
         severity = triage.findings.get("severity", "Unknown") if triage else "Unknown"
         root_cause = rca.findings.get("root_cause", "Undetermined") if rca else "Undetermined"
         confidence = rca.findings.get("confidence_score", 0) if rca else 0
-        total_actions = response.findings.get("total_actions", 0) if response else 0
+        recommended_actions = response.findings.get("actions_recommended", []) if response else []
+        total_actions = len(recommended_actions)
         compression_ratio = compression.findings.get("compression_ratio", "N/A") if compression else "N/A"
         blast_radius = rca.findings.get("blast_radius", 0) if rca else 0
 
@@ -783,6 +853,7 @@ class OrchestratorAgent:
             "blast_radius": blast_radius,
             "compression_ratio": compression_ratio,
             "response_actions": total_actions,
+            "recommended_actions": recommended_actions,
             "agents_used": len(reports),
             "all_succeeded": all(r.status == AgentStatus.COMPLETED for r in reports.values()),
             "iterations": context.iteration if context else 0,
