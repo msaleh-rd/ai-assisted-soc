@@ -912,11 +912,13 @@ async function runOrchestration() {
     orchStartTime = Date.now();
     orchTimerInterval = setInterval(updateOrchTimer, 100);
 
+    const useAiPlanner = document.getElementById('orchUseAIPlanner')?.checked || false;
+
     try {
         const response = await fetch('/api/v3/orchestrator/investigate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ task, alert_data: alertData }),
+            body: JSON.stringify({ task, alert_data: alertData, use_ai_planner: useAiPlanner }),
         });
         
         let reader = null;
@@ -976,12 +978,10 @@ function resetOrchUI() {
     document.getElementById('orchReasoning').textContent = '';
     document.getElementById('orchSynthesis').style.display = 'none';
     document.getElementById('orchLogCount').textContent = '0 events';
+    document.getElementById('orchDag').innerHTML = '';
+    const pendingBtn = document.getElementById('orchPendingBtn');
+    if (pendingBtn) pendingBtn.style.display = 'none';
     setOrchStatus('planning');
-
-    // Reset all agent nodes
-    document.querySelectorAll('.agent-node').forEach(node => {
-        node.className = 'agent-node pending';
-    });
 }
 
 function handleOrchEvent(type, data) {
@@ -997,6 +997,7 @@ function handleOrchEvent(type, data) {
         case 'plan_created':
             setOrchStatus('running');
             document.getElementById('orchReasoning').textContent = data.reasoning;
+            renderDynamicDAG(data.phases || []);
             addOrchLog(type, 'orchestrator', `Plan created: ${data.total_tasks} tasks across ${data.total_phases} phases`);
             break;
 
@@ -1007,6 +1008,22 @@ function handleOrchEvent(type, data) {
 
         case 'pending_approval':
             setOrchStatus('pending_approval');
+            const btn = document.getElementById('orchPendingBtn');
+            if (btn) {
+                btn.style.display = 'inline-block';
+                btn.onclick = () => {
+                    document.querySelector('.nav-item[data-page="approvals"]').click();
+                    setTimeout(() => {
+                        const el = document.getElementById(`approval-${data.workflow_id}`);
+                        if(el) {
+                            el.scrollIntoView({behavior: 'smooth', block: 'center'});
+                            el.style.transition = 'box-shadow 0.3s ease-in-out';
+                            el.style.boxShadow = '0 0 15px var(--accent-red)';
+                            setTimeout(() => el.style.boxShadow = 'none', 3000);
+                        }
+                    }, 200);
+                };
+            }
             addOrchLog('warning', 'orchestrator', `Workflow paused. Human authorization required for active response.`);
             addPendingApproval(data.workflow_id);
             break;
@@ -1039,6 +1056,71 @@ function handleOrchEvent(type, data) {
             renderSynthesis(data.synthesis, data.total_duration_ms);
             break;
     }
+}
+
+function renderDynamicDAG(phases) {
+    const dagContainer = document.getElementById('orchDag');
+    dagContainer.innerHTML = ''; // clear
+
+    const agentIcons = {
+        'triage_agent': '&#128269;',
+        'evidence_agent': '&#128200;',
+        'discovery_agent': '&#127760;',
+        'compression_agent': '&#128476;',
+        'rca_agent': '&#128300;',
+        'response_agent': '&#9889;',
+    };
+
+    const agentLabels = {
+        'triage_agent': 'Triage',
+        'evidence_agent': 'Evidence',
+        'discovery_agent': 'Discovery',
+        'compression_agent': 'Compression',
+        'rca_agent': 'RCA',
+        'response_agent': 'Response',
+    };
+
+    phases.forEach((phase, index) => {
+        // Add connector arrow (if not first phase)
+        if (index > 0) {
+            const connector = document.createElement('div');
+            connector.className = 'dag-connector';
+            connector.innerHTML = '&#8595;';
+            dagContainer.appendChild(connector);
+        }
+
+        const phaseDiv = document.createElement('div');
+        phaseDiv.className = 'dag-phase';
+        phaseDiv.id = `dagPhase${phase.phase_num}`;
+
+        const parallelBadge = phase.parallel ? ' <span class="parallel-badge">PARALLEL</span>' : '';
+        const labelDiv = document.createElement('div');
+        labelDiv.className = 'phase-label';
+        labelDiv.innerHTML = `Phase ${phase.phase_num}${parallelBadge}`;
+        phaseDiv.appendChild(labelDiv);
+
+        const agentsDiv = document.createElement('div');
+        agentsDiv.className = 'phase-agents';
+
+        const phaseAgents = phase.agents || (phase.tasks ? phase.tasks.map(t => t.agent) : []);
+
+        phaseAgents.forEach(agentName => {
+            const nodeDiv = document.createElement('div');
+            nodeDiv.className = 'agent-node pending';
+            nodeDiv.id = `node-${agentName}`;
+            nodeDiv.dataset.agent = agentName;
+
+            nodeDiv.innerHTML = `
+                <div class="agent-icon">${agentIcons[agentName] || '&#9881;'}</div>
+                <div class="agent-label">${agentLabels[agentName] || agentName}</div>
+                <div class="agent-status-dot"></div>
+            `;
+            agentsDiv.appendChild(nodeDiv);
+        });
+
+        phaseDiv.appendChild(agentsDiv);
+        dagContainer.appendChild(phaseDiv);
+    });
 }
 
 function setOrchStatus(status) {

@@ -606,7 +606,11 @@
                     <label>Task Description</label>
                     <input type="text" id="orchTask" class="form-input" value="Investigate security alert and recommend response" />
                 </div>
-                <button class="btn btn-primary btn-wide" onclick="runOrchestration()" id="orchStartBtn">
+                <div class="form-group" style="display: flex; align-items: center; gap: 10px; margin-top: 12px;">
+                    <input type="checkbox" id="orchUseAIPlanner" style="width: auto; accent-color: #b794f4;">
+                    <label for="orchUseAIPlanner" style="margin-bottom: 0; font-weight: 600; color: #b794f4; cursor: pointer;">&#9889; Enable AI-Driven Planner</label>
+                </div>
+                <button class="btn btn-primary btn-wide" onclick="runOrchestration()" id="orchStartBtn" style="margin-top: 12px;">
                     &#9654; Run Agentic Investigation
                 </button>
             </div>
@@ -615,75 +619,16 @@
             <div class="panel orch-panel" id="orchPanel" style="display:none;">
                 <!-- Plan Display -->
                 <div class="orch-plan" id="orchPlan">
-                    <div class="orch-plan-header">
+                    <div class="orch-plan-header" style="display: flex; align-items: center; gap: 10px;">
                         <span class="orch-status-badge" id="orchStatus">Planning...</span>
                         <span class="orch-timer" id="orchTimer">0.0s</span>
+                        <button id="orchPendingBtn" class="btn btn-sm" style="display:none; margin-left:auto; background:var(--accent-red); color:white; border:none; cursor:pointer;" onclick="">Review Pending Approval &rarr;</button>
                     </div>
                     <div class="orch-reasoning" id="orchReasoning"></div>
                 </div>
 
-                <!-- Agent DAG -->
-                <div class="orch-dag" id="orchDag">
-                    <div class="dag-phase" id="dagPhase1">
-                        <div class="phase-label">Phase 1</div>
-                        <div class="phase-agents">
-                            <div class="agent-node" id="node-triage_agent" data-agent="triage_agent">
-                                <div class="agent-icon">&#128269;</div>
-                                <div class="agent-label">Triage</div>
-                                <div class="agent-status-dot"></div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="dag-connector">&#8595;</div>
-                    <div class="dag-phase" id="dagPhase2">
-                        <div class="phase-label">Phase 2 <span class="parallel-badge">PARALLEL</span></div>
-                        <div class="phase-agents">
-                            <div class="agent-node" id="node-evidence_agent" data-agent="evidence_agent">
-                                <div class="agent-icon">&#128200;</div>
-                                <div class="agent-label">Evidence</div>
-                                <div class="agent-status-dot"></div>
-                            </div>
-                            <div class="agent-node" id="node-discovery_agent" data-agent="discovery_agent">
-                                <div class="agent-icon">&#127760;</div>
-                                <div class="agent-label">Discovery</div>
-                                <div class="agent-status-dot"></div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="dag-connector">&#8595;</div>
-                    <div class="dag-phase" id="dagPhase3">
-                        <div class="phase-label">Phase 3</div>
-                        <div class="phase-agents">
-                            <div class="agent-node" id="node-compression_agent" data-agent="compression_agent">
-                                <div class="agent-icon">&#128476;</div>
-                                <div class="agent-label">Compression</div>
-                                <div class="agent-status-dot"></div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="dag-connector">&#8595;</div>
-                    <div class="dag-phase" id="dagPhase4">
-                        <div class="phase-label">Phase 4</div>
-                        <div class="phase-agents">
-                            <div class="agent-node" id="node-rca_agent" data-agent="rca_agent">
-                                <div class="agent-icon">&#128300;</div>
-                                <div class="agent-label">RCA</div>
-                                <div class="agent-status-dot"></div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="dag-connector">&#8595;</div>
-                    <div class="dag-phase" id="dagPhase5">
-                        <div class="phase-label">Phase 5</div>
-                        <div class="phase-agents">
-                            <div class="agent-node" id="node-response_agent" data-agent="response_agent">
-                                <div class="agent-icon">&#9889;</div>
-                                <div class="agent-label">Response</div>
-                                <div class="agent-status-dot"></div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+                <!-- Agent DAG (dynamically rendered by JS) -->
+                <div class="orch-dag" id="orchDag"></div>
 
                 <!-- Live Event Log -->
                 <div class="orch-log-header">
