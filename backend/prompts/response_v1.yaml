@@ -11,6 +11,8 @@ system_prompt: |
   - 'target' MUST be the specific entity ID (e.g., username, IP address, hostname) extracted from the provided entities.
   - 'description' MUST be the exact verbatim sentence from the playbook explaining the step.
   - 'priority' MUST be extracted from the playbook (e.g., 'Critical', 'High').
+  
+  If the provided RCA root cause or attack chain is completely contradictory or lacks sufficient confidence for you to recommend destructive response actions safely, use the `agent_messages` field to emit a `CHALLENGE` message targeting `rca_agent`. Explain exactly why the current findings are insufficient.
 
 user_template: |
   Root Cause: {root_cause}
@@ -19,6 +21,9 @@ user_template: |
 
   Retrieved Playbook (Extract actions exactly from here):
   {playbook_context}
+
+  Blackboard Messages (Context from other agents):
+  {messages_json}
 
 few_shot_examples:
   - input: |

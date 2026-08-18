@@ -213,7 +213,7 @@ All endpoints are open. `CORS: allow_origins=["*"]`. No login, no API keys, no r
   - Use `CausalAnalyzer` for structural root-cause analysis
   - Combine causal analysis + LLM reasoning for hybrid RCA
   - Pass the causal graph as structured context to the LLM prompt
-- [ ] **Unify orchestrator implementations**
+- [x] **Unify orchestrator implementations**
   - Extract shared logic (plan building, input resolution, synthesis) into a single module
   - Have both `orchestrator.py` and `temporal_workflows.py` import from it
   - Eliminate the drift risk between the two implementations
@@ -305,7 +305,7 @@ All endpoints are open. `CORS: allow_origins=["*"]`. No login, no API keys, no r
 *Goal: Give analysts the context they need to make informed decisions.*
 *Priority: 🟡 P1*
 
-- [ ] **Detailed approval cards**
+- [x] **Detailed approval cards**
   - Show specific actions recommended (e.g., "Isolate WORKSTATION-042")
   - Show RCA confidence score and root cause summary
   - Show affected entities with risk scores
@@ -406,14 +406,14 @@ All endpoints are open. `CORS: allow_origins=["*"]`. No login, no API keys, no r
 |---|---|---|---|
 | 🔴 P0 | Wire Evidence/Compression agents to real engines (Gap A) | Critical | Medium |
 | 🔴 P0 | Adaptive re-investigation loop (Gap B) | Critical | High |
-| 🔴 P0 | Inter-agent communication / shared context (Gap C) | Critical | High |
+| ✅ Done | Inter-agent communication / shared context (Gap C) | Critical | High |
 | 🔴 P0 | Dynamic AI-driven planning (Gap D) | High | Medium |
 | 🟡 P1 | Confidence calibration & hallucination detection (Gap E) | High | Medium |
 | 🟡 P1 | Include few-shot examples in LLM calls (Gap F) | High | Low |
 | 🟡 P1 | LLM observability & call logging (Gap G) | High | Medium |
-| 🟡 P1 | Unify orchestrator implementations (Gap H) | Medium | Medium |
+| ✅ Done | Unify orchestrator implementations (Gap H) | Medium | Medium |
 | 🟡 P1 | Approval timeout & escalation (Gap I) | Medium | Low |
-| 🟡 P1 | Rich approval cards with action details (Gap J) | High | Medium |
+| ✅ Done | Rich approval cards with action details (Gap J) | High | Medium |
 | 🟡 P1 | Investigation history dashboard (Gap K) | High | Medium |
 | ✅ Done | Activate database persistence | High | Medium |
 | ✅ Done | Section-aware playbook chunking | High | Low |
@@ -443,3 +443,6 @@ All endpoints are open. `CORS: allow_origins=["*"]`. No login, no API keys, no r
 | Temporal Workflow Integration | 2026-08-17 | Durable 5-phase workflow with parallel activities |
 | Human-in-the-Loop (Phase 6) | 2026-08-17 | Temporal signals, approval UI, active response engine, audit trail |
 | Multi-Model Routing | 2026-08-17 | Role-based model selection in `llm_client.py` |
+| Unify Orchestrator Logic (Gap H) | 2026-08-18 | Extracted shared pipeline logic to `pipeline_core.py` |
+| Structured Response & Rich UI (Gap J) | 2026-08-18 | ResponsePlanner produces JSON actions, parsed by UI into Rich Approval Cards |
+| Inter-Agent Communication (Gap C) | 2026-08-18 | Added LLM message bus schema and removed hardcoded python communication simulations |

@@ -95,14 +95,7 @@ def _agent_report_to_dto(report) -> AgentReportDTO:
 
 
 # Map from agent registry names → Temporal activity names
-AGENT_TO_ACTIVITY = {
-    "triage_agent": "triage_activity",
-    "evidence_agent": "evidence_activity",
-    "discovery_agent": "discovery_activity",
-    "compression_agent": "compression_activity",
-    "rca_agent": "rca_activity",
-    "response_agent": "response_activity",
-}
+from backend.services.pipeline_core import AGENT_TO_ACTIVITY
 
 
 @activity.defn(name="planner_activity")
@@ -112,9 +105,8 @@ async def planner_activity(alert_data: Dict[str, Any]) -> List[List[Dict]]:
     Returns a plan in the same shape as _build_plan():
     List[List[Dict]] where each Dict has id, agent, activity, description.
     """
-    from backend.services.orchestrator import OrchestratorAgent
-    agent = OrchestratorAgent()
-    plan = await agent.plan("Investigate security alert", alert_data, use_ai_planner=True)
+    from backend.services.pipeline_core import build_ai_plan, AGENT_TO_ACTIVITY
+    plan = await build_ai_plan(alert_data, set(AGENT_TO_ACTIVITY.keys()))
 
     temporal_plan = []
     for phase in plan.phases:
@@ -284,8 +276,15 @@ async def execute_response_activity(run_id: str, response_report: Dict[str, Any]
         long_term_remediation: List[Any]
         
     actions = []
-    actions = []
     for item in findings.get("actions_recommended", []):
+        if isinstance(item, str):
+            # Fallback for LLM hallucinating a list of strings instead of dicts
+            item = {
+                "action_type": "isolate_host",
+                "target": "Unknown",
+                "description": item,
+                "priority": "critical" if "critical" in item.lower() else "high"
+            }
         try:
             action_enum = ResponseAction(item.get("action_type", "isolate_host"))
         except ValueError:
@@ -379,7 +378,7 @@ class InvestigationWorkflow:
         run_start = workflow.now()
 
         from backend.services.investigation_context import InvestigationContext
-        context = InvestigationContext(alert_data=input.alert_data)
+        context = InvestigationContext(alert_data=input.alert_data, use_ai_planner=input.use_ai_planner)
         context_dict = context.to_dict()
 
         self._progress.run_id = run_id
@@ -401,14 +400,9 @@ class InvestigationWorkflow:
             self._progress.plan_reasoning = "Generated dynamically by AI Planner based on alert context."
         else:
             # Static plan (deterministic, no IO)
+            from backend.services.pipeline_core import STATIC_PLAN_REASONING
             plan = self._build_plan(input.alert_data)
-            self._progress.plan_reasoning = (
-                "1) Triage first to understand severity and extract entities. "
-                "2) Evidence collection and network discovery run in PARALLEL. "
-                "3) Compression needs evidence data, so it waits. "
-                "4) RCA needs both compressed evidence AND network context. "
-                "5) Response planning depends on root cause identification."
-            )
+            self._progress.plan_reasoning = STATIC_PLAN_REASONING
 
         self._progress.total_phases = len(plan)
         self._progress.phases = [
@@ -435,8 +429,11 @@ class InvestigationWorkflow:
 
         if input.use_ai_planner:
             # ---- DYNAMIC EXECUTION (AI Planner path) ----
-            # Generic loop over however many phases the AI planned
-            for phase_idx, phase in enumerate(plan):
+            # Generic loop over however many phases the AI planned, with support for adaptive jump-backs
+            from backend.services.investigation_context import InvestigationContext
+            phase_idx = 0
+            while phase_idx < len(plan):
+                phase = plan[phase_idx]
                 self._progress.current_phase = phase_idx + 1
                 self._progress.phases[phase_idx]["status"] = "running"
 
@@ -456,6 +453,29 @@ class InvestigationWorkflow:
                     all_reports[td["id"]] = res["report"]
                     self._progress.completed_reports[td["id"]] = res["report"]
                 self._progress.phases[phase_idx]["status"] = "completed"
+
+                # Check if we need to loop back due to Inter-Agent Communication (e.g. REQUEST_EVIDENCE)
+                ctx_obj = InvestigationContext.from_dict(context_dict)
+                if ctx_obj.needs_reinvestigation():
+                    evidence_idx = -1
+                    for i, p in enumerate(plan):
+                        if any(t["activity"] == "evidence_activity" for t in p):
+                            evidence_idx = i
+                            break
+                    
+                    if evidence_idx != -1 and evidence_idx <= phase_idx:
+                        ctx_obj.iteration += 1
+                        ctx_obj.confidence_history.append(ctx_obj.rca_findings.get("confidence_score", 0.0))
+                        context_dict = ctx_obj.to_dict()
+                        
+                        # Reset phases status so UI knows we went back
+                        for i in range(evidence_idx, phase_idx + 1):
+                            self._progress.phases[i]["status"] = "pending"
+                        
+                        phase_idx = evidence_idx
+                        continue
+                
+                phase_idx += 1
 
         else:
             # ---- STATIC EXECUTION (Legacy adaptive loop) ----
@@ -576,7 +596,7 @@ class InvestigationWorkflow:
         self._progress.synthesis = synthesis
 
         # ---- APPROVAL GATE ----
-        response_report = all_reports.get("task-response", {})
+        response_report = next((r for r in all_reports.values() if r.get("agent_name") == "response_agent"), {})
         actions_recommended = response_report.get("findings", {}).get("actions_recommended", [])
         
         if actions_recommended:
@@ -620,107 +640,11 @@ class InvestigationWorkflow:
     # ----------------------------------------------------------------
 
     def _build_plan(self, alert_data: Dict[str, Any]) -> List[List[Dict]]:
-        """Build the phased execution plan (mirrors OrchestratorAgent.plan)."""
-        return [
-            # Phase 1: Triage (serial)
-            [
-                {
-                    "id": "task-triage",
-                    "agent": "triage_agent",
-                    "activity": "triage_activity",
-                    "description": "Analyze alert severity, classify threat, identify entities",
-                }
-            ],
-            # Phase 2: Evidence + Discovery (parallel)
-            [
-                {
-                    "id": "task-evidence",
-                    "agent": "evidence_agent",
-                    "activity": "evidence_activity",
-                    "description": "Expand entity graph and collect evidence",
-                },
-                {
-                    "id": "task-discovery",
-                    "agent": "discovery_agent",
-                    "activity": "discovery_activity",
-                    "description": "Probe network reachability and open ports",
-                },
-            ],
-            # Phase 3: Compression (serial)
-            [
-                {
-                    "id": "task-compression",
-                    "agent": "compression_agent",
-                    "activity": "compression_activity",
-                    "description": "7-stage event noise reduction pipeline",
-                }
-            ],
-            # Phase 4: RCA (serial, depends on compression + discovery)
-            [
-                {
-                    "id": "task-rca",
-                    "agent": "rca_agent",
-                    "activity": "rca_activity",
-                    "description": "Root cause analysis and attack chain reconstruction",
-                }
-            ],
-            # Phase 5: Response (serial)
-            [
-                {
-                    "id": "task-response",
-                    "agent": "response_agent",
-                    "activity": "response_activity",
-                    "description": "Generate prioritised response plan",
-                }
-            ],
-        ]
+        """Build the phased execution plan — delegates to pipeline_core."""
+        from backend.services.pipeline_core import build_static_plan_dicts
+        return build_static_plan_dicts()
 
     def _synthesize(self, reports: Dict[str, Dict[str, Any]], context: Any) -> Dict[str, Any]:
-        """Synthesise all agent reports into a final verdict."""
-        triage = reports.get("task-triage", {}).get("findings", {})
-        evidence = reports.get("task-evidence", {}).get("findings", {})
-        compression = reports.get("task-compression", {}).get("findings", {})
-        rca = reports.get("task-rca", {}).get("findings", {})
-        response = reports.get("task-response", {}).get("findings", {})
-
-        severity = triage.get("severity", "Unknown")
-        root_cause = rca.get("root_cause", "Undetermined")
-        confidence = rca.get("confidence_score", 0)
-        recommended_actions = response.get("actions_recommended", [])
-        total_actions = len(recommended_actions)
-        compression_ratio = compression.get("compression_ratio", "N/A")
-        blast_radius = rca.get("blast_radius", 0)
-
-        if confidence >= 0.8:
-            verdict = "High-confidence root cause identified. Immediate response recommended."
-        elif confidence >= 0.5:
-            verdict = "Moderate confidence in findings. Consider additional investigation."
-        else:
-            verdict = "Low confidence. Adaptive re-investigation recommended."
-
-        messages_exchanged = [m.to_dict() for m in context.messages] if context else []
-
-        return {
-            "verdict": verdict,
-            "severity": severity,
-            "root_cause": root_cause,
-            "confidence": confidence,
-            "blast_radius": blast_radius,
-            "compression_ratio": compression_ratio,
-            "response_actions": total_actions,
-            "recommended_actions": recommended_actions,
-            "agents_used": len(reports),
-            "all_succeeded": all(
-                r.get("status") == "completed" for r in reports.values()
-            ),
-            "iterations": context.iteration if context else 0,
-            "confidence_history": context.confidence_history if context else [],
-            "messages_exchanged": len(messages_exchanged),
-            "executive_summary": (
-                f"Investigation complete. Severity: {severity}. "
-                f"Root cause: {root_cause} (confidence: {confidence:.0%}). "
-                f"Blast radius: {blast_radius} entities. "
-                f"Event noise reduced by {compression_ratio}. "
-                f"{total_actions} response actions recommended."
-            ),
-        }
+        """Synthesise all agent reports into a final verdict — delegates to pipeline_core."""
+        from backend.services.pipeline_core import synthesize_reports
+        return synthesize_reports(reports, context)

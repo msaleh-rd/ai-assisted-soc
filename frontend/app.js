@@ -1286,6 +1286,7 @@ function addPendingApproval(workflowId, actions = [], confidence = 0, entities =
     
     // Add badge notification
     const badge = document.getElementById('approvalBadge');
+    badge.textContent = (parseInt(badge.textContent) || 0) + 1;
     badge.style.display = 'inline-block';
     
     const card = document.createElement('div');
@@ -1334,7 +1335,7 @@ async function loadPendingApprovals() {
                 return;
             }
             
-            badge.textContent = pending.length;
+            badge.textContent = '0'; // reset before loop
             badge.style.display = 'inline-block';
             
             pending.forEach(p => {

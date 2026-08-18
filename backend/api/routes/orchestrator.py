@@ -321,11 +321,11 @@ async def list_pending_approvals():
                 reports = progress.get("completed_reports", {})
                 
                 # Get recommended actions from Response agent
-                response_report = reports.get("task-response", {})
+                response_report = next((r for r in reports.values() if r.get("agent_name") == "response_agent"), {})
                 actions = response_report.get("findings", {}).get("actions_recommended", [])
                 
                 # Get entities from Triage agent
-                triage_report = reports.get("task-triage", {})
+                triage_report = next((r for r in reports.values() if r.get("agent_name") == "triage_agent"), {})
                 entities = triage_report.get("findings", {}).get("entities_identified", [])
                 
                 synthesis = progress.get("synthesis", {})

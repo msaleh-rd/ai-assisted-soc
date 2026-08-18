@@ -29,6 +29,7 @@ class InvestigationContext:
     Agents read from and write to this context instead of passing dicts linearly.
     """
     alert_data: Dict[str, Any] = field(default_factory=dict)
+    use_ai_planner: bool = False
     
     # Phase 1: Triage outputs
     entities: List[Dict[str, Any]] = field(default_factory=list)

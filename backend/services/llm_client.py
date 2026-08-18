@@ -68,12 +68,19 @@ class TriageOutput(BaseModel):
     initial_assessment: str = Field(description="A 1-2 sentence human-readable summary of the alert")
 
 
+class InterAgentMessage(BaseModel):
+    target_agent: Literal["evidence_agent", "rca_agent", "response_agent", "triage_agent", "*"] = Field(description="The specific agent you are messaging.")
+    msg_type: Literal["REQUEST_EVIDENCE", "LOW_CONFIDENCE", "CHALLENGE", "FYI"] = Field(description="The intent of the message.")
+    payload: Dict[str, Any] = Field(description="A dictionary of data to pass. For REQUEST_EVIDENCE, this should include an 'entities' list of specific entity IDs you need more data on.")
+    reason: str = Field(description="Why you are sending this message.")
+
 class RCAOutput(BaseModel):
     """Schema for the RCAAnalystAgent's structured output."""
     root_cause: str = Field(description="A concise string explaining the root cause of the incident")
     attack_phases: List[str] = Field(description="A sequential list of steps or phases the attacker took")
     blast_radius: int = Field(description="The estimated number of impacted entities based on the evidence")
     confidence: float = Field(description="Confidence score between 0.0 and 1.0 in this analysis")
+    agent_messages: List[InterAgentMessage] = Field(default_factory=list, description="Optional. Send messages to other agents to request missing evidence.")
 
 
 class ActionItem(BaseModel):
@@ -87,6 +94,7 @@ class ResponseOutput(BaseModel):
     actions_recommended: List[ActionItem] = Field(description="List of structured response actions to take")
     critical_actions: int = Field(description="The exact number of actions extracted that are marked as '(Priority: Critical)' in the playbook.")
     summary: str = Field(description="A brief summary explaining why these specific playbook steps apply to this incident.")
+    agent_messages: List[InterAgentMessage] = Field(default_factory=list, description="Optional. Send messages to challenge low confidence RCA findings.")
 
 def verify_entities(entities: List[Entity], context_text: str) -> List[Entity]:
     """

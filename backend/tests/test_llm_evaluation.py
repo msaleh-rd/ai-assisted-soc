@@ -61,7 +61,8 @@ async def test_triage_malware(fixtures):
     fixture = next(f for f in fixtures if f["id"] == "alert_malware_1")
     agent = TriageAgent()
     
-    report = await agent.execute(inputs={"alert": fixture["alert_data"]}, context={})
+    from backend.services.investigation_context import InvestigationContext
+    report = await agent.execute(inputs={}, context=InvestigationContext(alert_data=fixture["alert_data"]))
     
     findings = report.findings
     assert findings.get("error") is None, f"LLM error: {findings.get('error')}"
@@ -82,7 +83,8 @@ async def test_triage_lateral_movement(fixtures):
     fixture = next(f for f in fixtures if f["id"] == "alert_lateral_1")
     agent = TriageAgent()
     
-    report = await agent.execute(inputs={"alert": fixture["alert_data"]}, context={})
+    from backend.services.investigation_context import InvestigationContext
+    report = await agent.execute(inputs={}, context=InvestigationContext(alert_data=fixture["alert_data"]))
     
     findings = report.findings
     assert findings.get("error") is None
@@ -99,7 +101,8 @@ async def test_triage_phishing(fixtures):
     fixture = next(f for f in fixtures if f["id"] == "alert_phishing_1")
     agent = TriageAgent()
     
-    report = await agent.execute(inputs={"alert": fixture["alert_data"]}, context={})
+    from backend.services.investigation_context import InvestigationContext
+    report = await agent.execute(inputs={}, context=InvestigationContext(alert_data=fixture["alert_data"]))
     
     findings = report.findings
     assert findings.get("error") is None
