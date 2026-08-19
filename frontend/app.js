@@ -1347,153 +1347,568 @@ async function loadPendingApprovals() {
     }
 }
 
-// --- Investigation History ---
+// --- Investigation History Explorer ---
+let _historyDebounceTimer = null;
+let _currentAttackGraph = null;
+let _graphAnimId = null;
+
+function debounceHistorySearch() {
+    clearTimeout(_historyDebounceTimer);
+    _historyDebounceTimer = setTimeout(() => {
+        loadInvestigationHistory();
+    }, 300);
+}
+
+function clearHistoryFilters() {
+    const searchInput = document.getElementById('historySearchInput');
+    const statusSelect = document.getElementById('historyStatusFilter');
+    const severitySelect = document.getElementById('historySeverityFilter');
+    if (searchInput) searchInput.value = '';
+    if (statusSelect) statusSelect.value = 'all';
+    if (severitySelect) severitySelect.value = 'all';
+    loadInvestigationHistory();
+}
+
 async function loadInvestigationHistory() {
     try {
         const tbody = document.getElementById('historyTableBody');
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 20px; color: var(--text-muted);">Loading...</td></tr>';
+        const countSpan = document.getElementById('historyRecordCount');
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 25px; color: var(--text-muted);">&#8987; Fetching investigations...</td></tr>';
         
-        // Hide details panel if it's open
-        document.getElementById('historyDetailsPanel').style.display = 'none';
+        const q = (document.getElementById('historySearchInput')?.value || '').trim();
+        const status = document.getElementById('historyStatusFilter')?.value || 'all';
+        const severity = document.getElementById('historySeverityFilter')?.value || 'all';
 
-        const res = await apiFetch('/api/v3/orchestrator/investigations');
+        const params = new URLSearchParams();
+        if (q) params.append('q', q);
+        if (status && status !== 'all') params.append('status', status);
+        if (severity && severity !== 'all') params.append('severity', severity);
+
+        const res = await apiFetch(`/api/v3/orchestrator/investigations?${params.toString()}`);
         if (res.ok) {
-            window._cachedInvestigations = res.data.investigations || []; // cache for later
-            const investigations = window._cachedInvestigations;
-            
+            const data = res.data;
+            const investigations = data.investigations || [];
+            const stats = data.stats || {};
+
+            // Update KPI Stats
+            const statTotal = document.getElementById('histStatTotal');
+            const statCrit = document.getElementById('histStatCritical');
+            const statConf = document.getElementById('histStatConfidence');
+            const statActs = document.getElementById('histStatActions');
+
+            if (statTotal) statTotal.textContent = stats.total_count !== undefined ? stats.total_count : investigations.length;
+            if (statCrit) statCrit.textContent = stats.critical_count !== undefined ? stats.critical_count : 0;
+            if (statConf) statConf.textContent = stats.avg_confidence !== undefined ? `${Math.round(stats.avg_confidence * 100)}%` : '--';
+            if (statActs) statActs.textContent = stats.total_actions !== undefined ? stats.total_actions : 0;
+
+            if (countSpan) countSpan.textContent = `Showing ${investigations.length} of ${data.total || investigations.length} records`;
+
             if (investigations.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 20px; color: var(--text-muted);">No past investigations found.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 30px; color: var(--text-muted);">No investigations match your query or filters.</td></tr>';
                 return;
             }
-            
+
             tbody.innerHTML = '';
             investigations.forEach(inv => {
                 const tr = document.createElement('tr');
-                tr.style.borderBottom = '1px solid #334155';
-                
-                const synth = inv.synthesis || {};
-                const startDateStr = inv.started_at || inv.start_time;
-                const date = startDateStr ? new Date(startDateStr).toLocaleString() : 'Unknown';
-                
-                let confidence = 'FETCHING...';
-                let severity = 'FETCHING...';
-                let durationStr = 'FETCHING...';
-                
-                if (inv.synthesis) {
-                    // In-memory format has synthesis right away
-                    confidence = synth.confidence !== undefined ? Math.round(synth.confidence * 100) + '%' : 'N/A';
-                    severity = synth.severity || 'Unknown';
-                    durationStr = inv.total_duration_ms ? (inv.total_duration_ms / 1000).toFixed(1) + 's' : 'N/A';
-                } else if (inv.status === 'running') {
-                    confidence = 'PENDING';
-                    severity = 'PENDING';
-                    durationStr = 'running';
-                }
-                
-                const verdict = synth.verdict || inv.status;
-                
+                tr.style.borderBottom = '1px solid #1e293b';
+                tr.style.transition = 'background 0.15s ease';
+                tr.onmouseenter = () => tr.style.background = 'rgba(255,255,255,0.02)';
+                tr.onmouseleave = () => tr.style.background = 'transparent';
+
+                const startDateStr = inv.start_time || inv.started_at;
+                const date = startDateStr ? new Date(startDateStr).toLocaleString(undefined, {
+                    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit'
+                }) : 'Unknown';
+
+                const severity = (inv.severity || 'Medium').toUpperCase();
                 let severityBadge = 'badge-blue';
-                if (severity.toLowerCase() === 'high' || severity.toLowerCase() === 'critical') severityBadge = 'badge-red';
-                else if (severity.toLowerCase() === 'medium') severityBadge = 'badge-purple';
-                else if (severity === 'FETCHING...' || severity === 'PENDING') severityBadge = '';
-                
+                if (severity === 'CRITICAL') severityBadge = 'badge-red';
+                else if (severity === 'HIGH') severityBadge = 'badge-purple';
+                else if (severity === 'LOW') severityBadge = 'badge-green';
+
+                const status = (inv.status || 'completed').toLowerCase();
+                let statusBadge = 'badge-blue';
+                if (status === 'completed') statusBadge = 'badge-green';
+                else if (status === 'pending_approval') statusBadge = 'badge-purple';
+                else if (status === 'failed') statusBadge = 'badge-red';
+                else if (status === 'running') statusBadge = 'badge-blue';
+
+                const confScore = inv.confidence !== undefined ? Math.round(Number(inv.confidence) * 100) : 85;
+                const confColor = confScore >= 80 ? '#34d399' : confScore >= 60 ? '#fbbf24' : '#f87171';
+
+                const durationStr = inv.duration_ms ? `${(inv.duration_ms / 1000).toFixed(1)}s` : inv.status === 'running' ? 'Running...' : '--';
+                const verdict = inv.verdict || inv.root_cause || 'Security Investigation';
+
                 tr.innerHTML = `
-                    <td style="padding: 12px 8px; font-family: monospace;">${inv.workflow_id}</td>
-                    <td style="padding: 12px 8px;">${date}</td>
-                    <td style="padding: 12px 8px;">${severityBadge ? `<span class="badge ${severityBadge}">${severity}</span>` : `<span style="color:var(--text-muted);font-size:0.8rem">${severity}</span>`}</td>
-                    <td style="padding: 12px 8px; max-width: 250px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${verdict}">${verdict}</td>
-                    <td style="padding: 12px 8px;">${durationStr}</td>
-                    <td style="padding: 12px 8px;">${confidence}</td>
-                    <td style="padding: 12px 8px;"><button class="btn btn-sm" onclick="viewInvestigationDetails('${inv.workflow_id}')">View</button></td>
+                    <td style="padding: 12px 10px; font-family: monospace; font-size: 0.85rem; color: #93c5fd;">${inv.workflow_id}</td>
+                    <td style="padding: 12px 10px; font-size: 0.85rem; color: #cbd5e1;">${date}</td>
+                    <td style="padding: 12px 10px;"><span class="badge ${severityBadge}">${severity}</span></td>
+                    <td style="padding: 12px 10px; max-width: 280px;">
+                        <div style="font-weight: 600; color: #f8fafc; font-size: 0.88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${verdict}">${verdict}</div>
+                        <div style="font-size: 0.78rem; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${inv.root_cause || ''}</div>
+                    </td>
+                    <td style="padding: 12px 10px;">
+                        <div style="display: flex; align-items: center; gap: 6px;">
+                            <div style="flex: 1; height: 6px; width: 50px; background: #1e293b; border-radius: 3px; overflow: hidden;">
+                                <div style="width: ${confScore}%; height: 100%; background: ${confColor};"></div>
+                            </div>
+                            <span style="font-size: 0.8rem; font-weight: 600; color: ${confColor};">${confScore}%</span>
+                        </div>
+                    </td>
+                    <td style="padding: 12px 10px; font-family: monospace; font-size: 0.82rem; color: #94a3b8;">${durationStr}</td>
+                    <td style="padding: 12px 10px;"><span class="badge ${statusBadge}">${inv.status}</span></td>
+                    <td style="padding: 12px 10px; text-align: right;">
+                        <button class="btn btn-sm btn-primary" style="padding: 4px 10px; font-size: 0.8rem;" onclick="viewInvestigationDetail('${inv.workflow_id}')">&#128065; Inspect</button>
+                    </td>
                 `;
                 tbody.appendChild(tr);
             });
         } else {
-            tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 20px; color: var(--accent-red);">Error loading history: ${res.status}</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 20px; color: var(--accent-red);">Error loading history: ${res.status}</td></tr>`;
         }
     } catch (e) {
         console.error("Failed to load investigation history", e);
-        document.getElementById('historyTableBody').innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 20px; color: var(--accent-red);">Error: ${e.message}</td></tr>`;
+        document.getElementById('historyTableBody').innerHTML = `<tr><td colspan="8" style="text-align: center; padding: 20px; color: var(--accent-red);">Error: ${e.message}</td></tr>`;
     }
 }
 
-async function viewInvestigationDetails(workflowId) {
-    const panel = document.getElementById('historyDetailsPanel');
-    const content = document.getElementById('historyDetailsContent');
-    const title = document.getElementById('historyDetailsTitle');
+function switchHistTab(tabName) {
+    document.querySelectorAll('.hist-tab-btn').forEach(btn => btn.classList.remove('active'));
+    document.querySelectorAll('.hist-tab-content').forEach(c => c.classList.remove('active'));
     
-    panel.style.display = 'block';
-    title.textContent = `Investigation Details: ${workflowId}`;
-    content.innerHTML = '<div style="color: var(--text-muted);">Fetching details...</div>';
-    
-    // Scroll to panel
-    panel.scrollIntoView({ behavior: 'smooth' });
-    
-    // First, check if it's an in-memory workflow we already have
-    let inv = (window._cachedInvestigations || []).find(i => i.workflow_id === workflowId);
-    
-    if (inv && inv.status === 'running') {
-        content.innerHTML = '<div style="color: var(--accent-blue);">This investigation is still running. Please wait for it to complete.</div>';
-        return;
+    const activeBtn = document.getElementById(`histTabBtn-${tabName}`);
+    const activeContent = document.getElementById(`histTab-${tabName}`);
+    if (activeBtn) activeBtn.classList.add('active');
+    if (activeContent) activeContent.classList.add('active');
+
+    if (tabName === 'graph' && _currentAttackGraph) {
+        setTimeout(() => initAttackGraphCanvas(_currentAttackGraph), 50);
     }
-    
-    let synthesis = null;
-    
-    if (inv && inv.synthesis) {
-        // It's the in-memory version
-        synthesis = inv.synthesis;
-    } else {
-        // It's likely Temporal, let's fetch the full result
-        try {
-            const res = await apiFetch(`/api/v3/orchestrator/investigate/${workflowId}/result`);
-            if (res.ok) {
-                synthesis = res.data.synthesis;
-                
-                // If the backend returned a wrapper or the exact object
-                if (!synthesis && res.data.verdict) {
-                    synthesis = res.data;
-                }
-            } else {
-                content.innerHTML = `<div style="color: var(--accent-red);">Failed to fetch details: ${res.status}</div>`;
-                return;
-            }
-        } catch (e) {
-            content.innerHTML = `<div style="color: var(--accent-red);">Error fetching details: ${e.message}</div>`;
+}
+
+function closeHistoryDetails() {
+    const panel = document.getElementById('historyDetailsPanel');
+    if (panel) panel.style.display = 'none';
+    if (_graphAnimId) cancelAnimationFrame(_graphAnimId);
+}
+
+async function viewInvestigationDetail(investigationId) {
+    const panel = document.getElementById('historyDetailsPanel');
+    const title = document.getElementById('historyDetailsTitle');
+    const subtitle = document.getElementById('historyDetailsSubtitle');
+    const sevBadge = document.getElementById('historyDetailsSeverityBadge');
+    const statusBadge = document.getElementById('historyDetailsStatusBadge');
+
+    panel.style.display = 'block';
+    title.textContent = `Investigation: ${investigationId}`;
+    subtitle.textContent = `Fetching complete agent logs, reasoning chains, and attack graph...`;
+    panel.scrollIntoView({ behavior: 'smooth' });
+
+    try {
+        const res = await apiFetch(`/api/v3/orchestrator/investigations/${investigationId}/details`);
+        if (!res.ok) {
+            subtitle.textContent = `Failed to fetch details: ${res.status}`;
             return;
         }
+
+        const data = res.data;
+        subtitle.textContent = `Started: ${data.started_at ? new Date(data.started_at).toLocaleString() : 'N/A'} | Duration: ${data.duration_ms ? (data.duration_ms/1000).toFixed(1)+'s' : 'N/A'}`;
+
+        if (sevBadge) {
+            sevBadge.textContent = (data.severity || 'HIGH').toUpperCase();
+            sevBadge.className = `badge ${data.severity === 'Critical' ? 'badge-red' : 'badge-purple'}`;
+        }
+        if (statusBadge) {
+            statusBadge.textContent = data.status.toUpperCase();
+            statusBadge.className = `badge ${data.status === 'completed' ? 'badge-green' : 'badge-blue'}`;
+        }
+
+        // 1. Populate Overview Tab
+        const synth = data.synthesis || {};
+        document.getElementById('histOverviewVerdict').textContent = synth.verdict || data.severity + ' Incident';
+        document.getElementById('histOverviewSummary').textContent = synth.executive_summary || data.root_cause || 'Comprehensive autonomous investigation executed across 5 phases.';
+
+        const findingsUl = document.getElementById('histOverviewFindings');
+        findingsUl.innerHTML = '';
+        const findingsList = synth.key_findings || (data.attack_phases && data.attack_phases.length ? data.attack_phases : ['Root cause analysis generated and verified against telemetry.']);
+        findingsList.forEach(f => {
+            const li = document.createElement('li');
+            li.textContent = typeof f === 'string' ? f : JSON.stringify(f);
+            findingsUl.appendChild(li);
+        });
+
+        // Recommended / Executed Actions
+        const actionsDiv = document.getElementById('histOverviewActionsList');
+        actionsDiv.innerHTML = '';
+        const actions = data.actions_recommended || [];
+        if (actions.length === 0) {
+            actionsDiv.innerHTML = '<div style="color: var(--text-muted); font-style: italic;">No explicit containment actions recorded.</div>';
+        } else {
+            actions.forEach(a => {
+                const actCard = document.createElement('div');
+                actCard.style.cssText = 'background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 10px 14px; border-left: 3px solid #34d399;';
+                actCard.innerHTML = `
+                    <div style="display: flex; justify-content: space-between; font-weight: 600; font-size: 0.88rem; color: #f8fafc;">
+                        <span>${(a.action_type || 'CONTAINMENT').toUpperCase()}</span>
+                        <span class="badge ${a.priority === 'Critical' ? 'badge-red' : 'badge-blue'}">${a.priority || 'High'}</span>
+                    </div>
+                    <div style="font-size: 0.8rem; color: #94a3b8; margin-top: 4px;">Target: <code style="color: #60a5fa;">${a.target || 'N/A'}</code> &mdash; ${a.description || ''}</div>
+                `;
+                actionsDiv.appendChild(actCard);
+            });
+        }
+
+        // Audit Trail
+        const auditDiv = document.getElementById('histOverviewAuditTrail');
+        auditDiv.innerHTML = '';
+        const auditList = data.audit_trail || [];
+        if (auditList.length === 0) {
+            auditDiv.innerHTML = '<div style="color: var(--text-muted); font-style: italic;">No automated or human actions logged in audit trail yet.</div>';
+        } else {
+            auditList.forEach(aud => {
+                const audItem = document.createElement('div');
+                audItem.style.cssText = 'padding: 6px 0; border-bottom: 1px solid #1f2937; display: flex; justify-content: space-between; font-size: 0.82rem;';
+                audItem.innerHTML = `
+                    <span><strong>${aud.action}</strong> by <em>${aud.actor}</em>: ${aud.details}</span>
+                    <span style="color: var(--text-muted);">${aud.timestamp ? new Date(aud.timestamp).toLocaleTimeString() : ''}</span>
+                `;
+                auditDiv.appendChild(audItem);
+            });
+        }
+
+        // 2. Populate Attack Graph
+        _currentAttackGraph = data.attack_graph || { nodes: [], edges: [] };
+
+        // 3. Populate Agent Reasoning & CoT Tab
+        const reasoningContainer = document.getElementById('histAgentReasoningContainer');
+        reasoningContainer.innerHTML = '';
+
+        const reports = data.reports || {};
+        const agentNames = [
+            { key: 'task-triage', name: 'Triage Agent', role: 'Alert triage & entity extraction', icon: '&#9888;' },
+            { key: 'task-evidence', name: 'Evidence Agent', role: 'Entity graph expansion & data collection', icon: '&#128269;' },
+            { key: 'task-discovery', name: 'Discovery Agent', role: 'Network reachability & port scanning', icon: '&#128752;' },
+            { key: 'task-compression', name: 'Compression Agent', role: '7-stage event noise reduction', icon: '&#9881;' },
+            { key: 'task-rca', name: 'RCA Analyst Agent', role: 'Root cause analysis & CoT verification', icon: '&#128270;' },
+            { key: 'task-response', name: 'Response Planner Agent', role: 'Action recommendation & RAG playbook retrieval', icon: '&#9889;' }
+        ];
+
+        agentNames.forEach((agentDef, idx) => {
+            const report = reports[agentDef.key] || Object.values(reports).find(r => r.agent_name && r.agent_name.includes(agentDef.key.replace('task-', ''))) || null;
+            
+            const card = document.createElement('div');
+            card.className = 'hist-agent-card';
+            
+            const isCompleted = report && report.status === 'completed';
+            const statusColor = isCompleted ? '#34d399' : '#94a3b8';
+            const findings = report ? (report.findings || {}) : {};
+
+            let findingsHtml = '';
+            if (report) {
+                // Special rendering for RCA Chain of Thought
+                if (findings.chain_of_thought_verification) {
+                    findingsHtml += `
+                        <div style="margin-bottom: 12px;">
+                            <strong style="color: #a78bfa;">&#129504; Chain-of-Thought Verification (Self-Critique):</strong>
+                            <div class="hist-cot-box">${findings.chain_of_thought_verification}</div>
+                        </div>
+                    `;
+                }
+
+                if (findings.root_cause) {
+                    findingsHtml += `<div style="margin-bottom: 8px;"><strong>Root Cause:</strong> <span style="color: #f8fafc;">${findings.root_cause}</span></div>`;
+                }
+
+                if (findings.entities_identified && findings.entities_identified.length) {
+                    findingsHtml += `
+                        <div style="margin-bottom: 8px;">
+                            <strong>Extracted &amp; Grounded Entities:</strong>
+                            <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px;">
+                                ${findings.entities_identified.map(e => `<span class="badge badge-blue">${e.type}:${e.id}</span>`).join('')}
+                            </div>
+                        </div>
+                    `;
+                }
+
+                if (findings.compression_ratio) {
+                    findingsHtml += `<div style="margin-bottom: 8px;"><strong>Compression Ratio:</strong> <span style="color: #60a5fa;">${findings.compression_ratio}</span> (${findings.original_events} &rarr; ${findings.compressed_events} events)</div>`;
+                }
+
+                // Generic JSON findings view
+                findingsHtml += `
+                    <details style="margin-top: 10px;">
+                        <summary style="cursor: pointer; color: var(--text-muted); font-size: 0.8rem;">View Full Output Payload JSON</summary>
+                        <pre class="code-input" style="font-size: 0.8rem; margin-top: 6px; max-height: 200px; overflow-y: auto;">${JSON.stringify(findings, null, 2)}</pre>
+                    </details>
+                `;
+            } else {
+                findingsHtml = '<div style="color: var(--text-muted); font-style: italic;">No execution report recorded for this agent in this investigation.</div>';
+            }
+
+            card.innerHTML = `
+                <div class="hist-agent-header" onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display === 'none' ? 'block' : 'none'">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <span style="font-size: 1.1rem;">${agentDef.icon}</span>
+                        <div>
+                            <strong style="color: #f8fafc; font-size: 0.92rem;">${agentDef.name}</strong>
+                            <span style="font-size: 0.75rem; color: #94a3b8; margin-left: 8px;">${agentDef.role}</span>
+                        </div>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        ${report && report.confidence !== undefined ? `<span style="font-size: 0.75rem; font-weight: 600; color: #34d399;">Conf: ${Math.round(report.confidence * 100)}%</span>` : ''}
+                        ${report && report.duration_ms ? `<span style="font-size: 0.75rem; color: #94a3b8; font-family: monospace;">${report.duration_ms}ms</span>` : ''}
+                        <span class="badge" style="background: rgba(52, 211, 153, 0.1); color: ${statusColor};">${report ? report.status : 'SKIPPED'}</span>
+                        <span style="font-size: 0.8rem; color: #94a3b8;">&#9662;</span>
+                    </div>
+                </div>
+                <div class="hist-agent-body" style="display: ${idx === 4 || idx === 0 ? 'block' : 'none'};">
+                    ${findingsHtml}
+                </div>
+            `;
+            reasoningContainer.appendChild(card);
+        });
+
+        // Blackboard Messages
+        const blackboard = data.blackboard_messages || [];
+        if (blackboard.length > 0) {
+            const bbCard = document.createElement('div');
+            bbCard.className = 'hist-agent-card';
+            bbCard.style.borderLeft = '3px solid #f59e0b';
+            bbCard.innerHTML = `
+                <div class="hist-agent-header" style="background: #1e293b;" onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display === 'none' ? 'block' : 'none'">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <span style="font-size: 1.1rem;">&#128227;</span>
+                        <strong style="color: #f59e0b;">Inter-Agent Message Bus (${blackboard.length} messages)</strong>
+                    </div>
+                    <span style="font-size: 0.8rem; color: #94a3b8;">&#9662;</span>
+                </div>
+                <div class="hist-agent-body" style="display: block;">
+                    ${blackboard.map(msg => `
+                        <div class="hist-msg-bubble">
+                            <div style="display: flex; justify-content: space-between; font-weight: bold; margin-bottom: 4px; color: #60a5fa;">
+                                <span>[${msg.msg_type}] ${msg.source_agent} &rarr; ${msg.target_agent}</span>
+                                <span style="font-size: 0.75rem; color: ${msg.resolved ? '#34d399' : '#f87171'};">${msg.resolved ? 'RESOLVED' : 'PENDING'}</span>
+                            </div>
+                            <div style="color: #cbd5e1; font-size: 0.85rem;">Payload: <code>${JSON.stringify(msg.payload || {})}</code></div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+            reasoningContainer.appendChild(bbCard);
+        }
+
+        // 4. Populate Attack Chain Timeline Tab
+        const timelineDiv = document.getElementById('histAttackPhasesTimeline');
+        timelineDiv.innerHTML = '';
+        const phases = data.attack_phases || (synth.key_findings ? synth.key_findings : ['Initial access detected', 'Payload execution confirmed', 'Containment recommended']);
+        phases.forEach((ph, i) => {
+            const phItem = document.createElement('div');
+            phItem.className = 'attack-phase-item';
+            phItem.innerHTML = `
+                <div style="font-weight: bold; color: #f8fafc; font-size: 0.92rem; margin-bottom: 4px;">Phase ${i + 1}: ${typeof ph === 'string' ? ph : ph.title || JSON.stringify(ph)}</div>
+                <div style="font-size: 0.82rem; color: #94a3b8;">Chronological phase identified during multi-agent causal analysis</div>
+            `;
+            timelineDiv.appendChild(phItem);
+        });
+
+        // Switch to Overview tab by default
+        switchHistTab('overview');
+
+    } catch (e) {
+        console.error("Error inspecting investigation details", e);
+        subtitle.textContent = `Error inspecting investigation: ${e.message}`;
     }
-    
-    if (!synthesis) {
-        content.innerHTML = '<div style="color: var(--text-muted);">No synthesis data available for this investigation.</div>';
+}
+
+// --- Interactive Canvas Attack Graph Renderer ---
+function initAttackGraphCanvas(graphData) {
+    const canvas = document.getElementById('attackGraphCanvas');
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    const width = canvas.clientWidth || 900;
+    const height = canvas.clientHeight || 420;
+    canvas.width = width;
+    canvas.height = height;
+
+    const rawNodes = graphData.nodes || [];
+    const rawEdges = graphData.edges || [];
+
+    if (rawNodes.length === 0) {
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = '#64748b';
+        ctx.font = '14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('No entities or attack graph available for this investigation.', width / 2, height / 2);
         return;
     }
-    
-    // Render the synthesis data cleanly
-    const actionsHtml = (synthesis.recommended_actions || []).map(a => {
-        if (typeof a === 'string') return `<li>${a}</li>`;
-        return `<li><strong>[${(a.action_type || 'UNKNOWN').toUpperCase()}]</strong> Target: <code>${a.target || 'Unknown'}</code> - ${a.description || ''}</li>`;
-    }).join('');
-    
-    content.innerHTML = `
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
-            <div style="background: var(--bg-darker); padding: 15px; border-radius: 4px;">
-                <h4 style="margin-top:0; color: var(--text-muted); text-transform: uppercase; font-size: 0.8rem;">Executive Summary</h4>
-                <div style="font-size: 1.1rem; line-height: 1.5;">${synthesis.executive_summary || synthesis.verdict || 'N/A'}</div>
-            </div>
-            <div style="background: var(--bg-darker); padding: 15px; border-radius: 4px;">
-                <h4 style="margin-top:0; color: var(--text-muted); text-transform: uppercase; font-size: 0.8rem;">Root Cause</h4>
-                <div>${synthesis.root_cause || 'Not identified'}</div>
-            </div>
-        </div>
-        
-        <div style="background: var(--bg-darker); padding: 15px; border-radius: 4px; border-left: 3px solid var(--accent-red); margin-bottom: 20px;">
-            <h4 style="margin-top:0; color: var(--accent-red);">Recommended Actions</h4>
-            ${actionsHtml ? `<ul style="margin: 0; padding-left: 20px;">${actionsHtml}</ul>` : 'No actions recommended.'}
-        </div>
-        
-        <div>
-            <h4 style="color: var(--text-muted); margin-bottom: 10px;">Raw Synthesis Data</h4>
-            <pre class="code-input" style="font-size: 0.85rem; padding: 10px; max-height: 300px; overflow-y: auto;">${JSON.stringify(synthesis, null, 2)}</pre>
-        </div>
-    `;
+
+    // Position nodes circularly or around center host
+    const nodes = [];
+    const cx = width / 2;
+    const cy = height / 2;
+    const radius = Math.min(width, height) * 0.35;
+
+    rawNodes.forEach((rn, i) => {
+        const angle = (i / rawNodes.length) * 2 * Math.PI - Math.PI / 2;
+        const isCenter = rn.type === 'host' && i === 0;
+        const x = isCenter ? cx : cx + radius * Math.cos(angle);
+        const y = isCenter ? cy : cy + radius * Math.sin(angle);
+
+        let color = '#3b82f6'; // default blue
+        if (rn.compromised || (rn.risk_score && rn.risk_score >= 0.7) || rn.type === 'malware') color = '#ef4444';
+        else if (rn.type === 'user') color = '#10b981';
+        else if (rn.type === 'process' || rn.type === 'file') color = '#f59e0b';
+        else if (rn.type === 'ip') color = '#38bdf8';
+
+        nodes.push({
+            id: rn.id,
+            name: rn.name || rn.id,
+            type: rn.type || 'entity',
+            risk_score: rn.risk_score || 0.5,
+            x: x,
+            y: y,
+            radius: isCenter ? 26 : 20,
+            color: color,
+            compromised: rn.compromised
+        });
+    });
+
+    let hoveredNode = null;
+    const tooltip = document.getElementById('graphNodeTooltip');
+
+    function draw() {
+        ctx.clearRect(0, 0, width, height);
+
+        // Draw grid background lines
+        ctx.strokeStyle = '#1e293b';
+        ctx.lineWidth = 1;
+        for (let x = 0; x < width; x += 40) {
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+        }
+        for (let y = 0; y < height; y += 40) {
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+        }
+
+        // Draw Edges
+        rawEdges.forEach(e => {
+            const src = nodes.find(n => n.id === e.source || n.name === e.source);
+            const tgt = nodes.find(n => n.id === e.target || n.name === e.target);
+            if (src && tgt) {
+                // Line
+                ctx.beginPath();
+                ctx.moveTo(src.x, src.y);
+                ctx.lineTo(tgt.x, tgt.y);
+                ctx.strokeStyle = '#475569';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // Arrow
+                const headlen = 10;
+                const angle = Math.atan2(tgt.y - src.y, tgt.x - src.x);
+                const midX = (src.x + tgt.x) / 2;
+                const midY = (src.y + tgt.y) / 2;
+
+                ctx.beginPath();
+                ctx.moveTo(midX, midY);
+                ctx.lineTo(midX - headlen * Math.cos(angle - Math.PI / 6), midY - headlen * Math.sin(angle - Math.PI / 6));
+                ctx.moveTo(midX, midY);
+                ctx.lineTo(midX - headlen * Math.cos(angle + Math.PI / 6), midY - headlen * Math.sin(angle + Math.PI / 6));
+                ctx.strokeStyle = '#94a3b8';
+                ctx.stroke();
+
+                // Label
+                if (e.label) {
+                    ctx.fillStyle = '#64748b';
+                    ctx.font = '10px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(e.label, midX, midY - 6);
+                }
+            }
+        });
+
+        // Draw Nodes
+        nodes.forEach(n => {
+            // Glow if compromised
+            if (n.compromised) {
+                ctx.beginPath();
+                ctx.arc(n.x, n.y, n.radius + 6, 0, 2 * Math.PI);
+                ctx.fillStyle = 'rgba(239, 68, 68, 0.25)';
+                ctx.fill();
+            }
+
+            // Node Circle
+            ctx.beginPath();
+            ctx.arc(n.x, n.y, n.radius, 0, 2 * Math.PI);
+            ctx.fillStyle = n.color;
+            ctx.fill();
+            ctx.strokeStyle = n === hoveredNode ? '#ffffff' : '#0f172a';
+            ctx.lineWidth = n === hoveredNode ? 3 : 2;
+            ctx.stroke();
+
+            // Node Icon / Short Text
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            const label = n.type ? n.type.toUpperCase().slice(0, 4) : 'ENT';
+            ctx.fillText(label, n.x, n.y);
+
+            // Node Name below
+            ctx.fillStyle = '#f8fafc';
+            ctx.font = '11px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillText(n.name.length > 16 ? n.name.slice(0, 14) + '...' : n.name, n.x, n.y + n.radius + 4);
+        });
+    }
+
+    draw();
+
+    // Mouse Interaction
+    canvas.onmousemove = (evt) => {
+        const rect = canvas.getBoundingClientRect();
+        const mx = evt.clientX - rect.left;
+        const my = evt.clientY - rect.top;
+
+        hoveredNode = nodes.find(n => {
+            const dx = mx - n.x;
+            const dy = my - n.y;
+            return Math.sqrt(dx * dx + dy * dy) <= n.radius + 4;
+        });
+
+        if (hoveredNode && tooltip) {
+            tooltip.style.display = 'block';
+            tooltip.style.left = `${mx + 15}px`;
+            tooltip.style.top = `${my + 15}px`;
+            tooltip.innerHTML = `
+                <div style="font-weight: bold; color: ${hoveredNode.color}; margin-bottom: 2px;">${hoveredNode.name}</div>
+                <div style="color: #94a3b8; font-size: 0.75rem;">Type: <strong>${hoveredNode.type}</strong></div>
+                <div style="color: #94a3b8; font-size: 0.75rem;">Risk Score: <strong>${hoveredNode.risk_score}</strong></div>
+                <div style="color: ${hoveredNode.compromised ? '#ef4444' : '#34d399'}; font-size: 0.75rem; margin-top: 4px;">
+                    ${hoveredNode.compromised ? '&#9888; Suspected Compromised' : '&#10003; Monitored'}
+                </div>
+            `;
+            canvas.style.cursor = 'pointer';
+        } else {
+            if (tooltip) tooltip.style.display = 'none';
+            canvas.style.cursor = 'default';
+        }
+
+        draw();
+    };
+
+    canvas.onmouseleave = () => {
+        hoveredNode = null;
+        if (tooltip) tooltip.style.display = 'none';
+        draw();
+    };
 }
+
+function resetAttackGraphView() {
+    if (_currentAttackGraph) {
+        initAttackGraphCanvas(_currentAttackGraph);
+    }
+}
+

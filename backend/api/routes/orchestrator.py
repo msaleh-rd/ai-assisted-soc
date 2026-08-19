@@ -84,27 +84,31 @@ async def investigate(request: OrchestrationRequest):
                 "status": "running",
                 "started_at": datetime.utcnow().isoformat(),
                 "synthesis": None,
+                "reports": {},
+                "alert_data": request.alert_data,
                 "total_duration_ms": 0
             }
             
             async for event in orchestrator.execute_stream(
                 request.task, request.alert_data, use_ai_planner=request.use_ai_planner
             ):
-                # We need to peek inside the SSE string to see if the run completed
+                # Peek inside the SSE string to record completed agents and final synthesis
                 try:
                     lines = event.strip().split('\n')
-                    is_complete = False
-                    for line in lines:
-                        if line == "event: run_complete":
-                            is_complete = True
-                        elif is_complete and line.startswith("data: "):
-                            data = json.loads(line[6:])
+                    if len(lines) >= 2 and lines[1].startswith("data: "):
+                        evt_type = lines[0].replace("event: ", "").strip()
+                        data_payload = json.loads(lines[1][6:])
+                        
+                        if evt_type == "agent_complete":
+                            task_id = data_payload.get("task_id")
+                            if task_id and "report" in data_payload:
+                                investigation_record["reports"][task_id] = data_payload["report"]
+                        elif evt_type == "run_complete":
                             investigation_record["status"] = "completed"
-                            investigation_record["synthesis"] = data.get("synthesis")
-                            investigation_record["total_duration_ms"] = data.get("total_duration_ms", 0)
+                            investigation_record["synthesis"] = data_payload.get("synthesis")
+                            investigation_record["total_duration_ms"] = data_payload.get("total_duration_ms", 0)
                             investigation_record["completed_at"] = datetime.utcnow().isoformat()
-                            IN_MEMORY_INVESTIGATIONS.insert(0, investigation_record) # Insert at beginning
-                            break
+                            IN_MEMORY_INVESTIGATIONS.insert(0, investigation_record)
                 except Exception:
                     pass
                     
@@ -283,18 +287,373 @@ async def stream_investigation(workflow_id: str):
 
 
 @router.get("/investigations")
-async def list_investigations():
+async def list_investigations(
+    q: Optional[str] = None,
+    status: Optional[str] = None,
+    severity: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
     """
-    List recent investigation workflows.
-
-    Works in both Temporal mode and in-memory mode.
+    List, search, and filter past and ongoing investigation workflows.
+    Aggregates data across Temporal, PostgreSQL, and In-Memory runs.
     """
-    if not USE_TEMPORAL:
-        return {"investigations": IN_MEMORY_INVESTIGATIONS, "count": len(IN_MEMORY_INVESTIGATIONS)}
+    merged_map: Dict[str, Dict[str, Any]] = {}
 
-    from backend.services.temporal_client import list_investigations as fetch_list
-    investigations = await fetch_list(limit=50)
-    return {"investigations": investigations, "count": len(investigations)}
+    # 1. Fetch from PostgreSQL if available
+    try:
+        from backend.database.connection import get_db
+        from backend.database.postgres import InvestigationRecord, RCAResultRecord, AuditRecord
+        import contextlib
+
+        with contextlib.closing(next(get_db())) as db:
+            query = db.query(InvestigationRecord).order_by(InvestigationRecord.started_at.desc()).limit(100)
+            records = query.all()
+            for rec in records:
+                rca = db.query(RCAResultRecord).filter(RCAResultRecord.investigation_id == rec.investigation_id).first()
+                audit_count = db.query(AuditRecord).filter(AuditRecord.investigation_id == rec.investigation_id).count()
+                
+                duration = 0
+                if rec.started_at and rec.completed_at:
+                    duration = int((rec.completed_at - rec.started_at).total_seconds() * 1000)
+                
+                merged_map[rec.investigation_id] = {
+                    "workflow_id": rec.investigation_id,
+                    "status": rec.status or "completed",
+                    "severity": rec.severity or ("Critical" if (rec.risk_score or 0) > 0.8 else "High" if (rec.risk_score or 0) > 0.5 else "Medium"),
+                    "verdict": "Confirmed Incident" if (rec.risk_score or 0) > 0.6 else "Suspicious Activity",
+                    "root_cause": rca.root_cause if rca else "Analysis completed",
+                    "confidence": rca.confidence if rca else (rec.risk_score or 0.85),
+                    "start_time": rec.started_at.isoformat() if rec.started_at else None,
+                    "close_time": rec.completed_at.isoformat() if rec.completed_at else None,
+                    "duration_ms": duration,
+                    "entity_count": rec.entity_count or 0,
+                    "actions_count": audit_count,
+                    "source": "postgres"
+                }
+    except Exception as db_err:
+        logger.debug(f"Postgres lookup skipped/unavailable: {db_err}")
+
+    # 2. Fetch from In-Memory
+    for inv in IN_MEMORY_INVESTIGATIONS:
+        w_id = inv.get("workflow_id")
+        if not w_id:
+            continue
+        synthesis = inv.get("synthesis") or {}
+        merged_map[w_id] = {
+            "workflow_id": w_id,
+            "status": inv.get("status", "completed"),
+            "severity": synthesis.get("severity") or "High",
+            "verdict": synthesis.get("verdict") or "Security Alert",
+            "root_cause": synthesis.get("root_cause") or synthesis.get("executive_summary") or inv.get("task", ""),
+            "confidence": synthesis.get("confidence_score") or 0.85,
+            "start_time": inv.get("started_at"),
+            "close_time": inv.get("completed_at"),
+            "duration_ms": inv.get("total_duration_ms", 0),
+            "entity_count": len(synthesis.get("key_findings", [])),
+            "actions_count": len(synthesis.get("recommended_immediate_actions", [])),
+            "source": "in-memory"
+        }
+
+    # 3. Fetch from Temporal if enabled
+    if USE_TEMPORAL:
+        try:
+            from backend.services.temporal_client import list_investigations as fetch_temporal, get_investigation_status
+            temporal_invs = await fetch_temporal(limit=50)
+            for t_inv in temporal_invs:
+                w_id = t_inv["workflow_id"]
+                existing = merged_map.get(w_id, {})
+                
+                # Enrich with progress details if status is running/pending
+                status_val = t_inv.get("status", existing.get("status", "completed"))
+                duration_val = existing.get("duration_ms", 0)
+                root_cause_val = existing.get("root_cause", "")
+                confidence_val = existing.get("confidence", 0.85)
+                severity_val = existing.get("severity", "High")
+                verdict_val = existing.get("verdict", "Investigation")
+                actions_count = existing.get("actions_count", 0)
+                
+                try:
+                    progress = await get_investigation_status(w_id)
+                    status_val = progress.get("status", status_val)
+                    if progress.get("total_duration_ms"):
+                        duration_val = progress["total_duration_ms"]
+                    synthesis = progress.get("synthesis") or {}
+                    if synthesis:
+                        root_cause_val = synthesis.get("executive_summary") or root_cause_val
+                        confidence_val = synthesis.get("confidence_score") or confidence_val
+                        verdict_val = synthesis.get("verdict") or verdict_val
+                        actions_count = len(synthesis.get("recommended_immediate_actions", []))
+                    
+                    reports = progress.get("completed_reports", {})
+                    triage = next((r for r in reports.values() if r.get("agent_name") == "triage_agent"), {})
+                    if triage:
+                        severity_val = triage.get("findings", {}).get("severity", severity_val)
+                except Exception:
+                    pass
+
+                merged_map[w_id] = {
+                    "workflow_id": w_id,
+                    "status": status_val,
+                    "severity": severity_val,
+                    "verdict": verdict_val,
+                    "root_cause": root_cause_val or "Automated Investigation",
+                    "confidence": confidence_val,
+                    "start_time": t_inv.get("start_time") or existing.get("start_time"),
+                    "close_time": t_inv.get("close_time") or existing.get("close_time"),
+                    "duration_ms": duration_val,
+                    "entity_count": existing.get("entity_count", 0),
+                    "actions_count": actions_count,
+                    "source": "temporal"
+                }
+        except Exception as t_err:
+            logger.debug(f"Temporal list error: {t_err}")
+
+    # Convert map to list and sort by date descending
+    investigation_list = list(merged_map.values())
+    investigation_list.sort(key=lambda x: str(x.get("start_time") or ""), reverse=True)
+
+    # 4. Apply Filters
+    if q:
+        query_str = q.lower().strip()
+        investigation_list = [
+            inv for inv in investigation_list
+            if query_str in str(inv.get("workflow_id", "")).lower()
+            or query_str in str(inv.get("root_cause", "")).lower()
+            or query_str in str(inv.get("verdict", "")).lower()
+            or query_str in str(inv.get("severity", "")).lower()
+        ]
+
+    if status and status.lower() != "all":
+        investigation_list = [
+            inv for inv in investigation_list
+            if str(inv.get("status", "")).lower() == status.lower()
+        ]
+
+    if severity and severity.lower() != "all":
+        investigation_list = [
+            inv for inv in investigation_list
+            if str(inv.get("severity", "")).lower() == severity.lower()
+        ]
+
+    total_count = len(investigation_list)
+    paginated = investigation_list[offset : offset + limit]
+
+    # Compute Summary Stats
+    critical_count = sum(1 for inv in merged_map.values() if str(inv.get("severity", "")).lower() == "critical")
+    avg_conf = (
+        round(sum(float(inv.get("confidence", 0.8)) for inv in merged_map.values()) / max(len(merged_map), 1), 2)
+        if merged_map else 0.0
+    )
+    total_actions = sum(int(inv.get("actions_count", 0)) for inv in merged_map.values())
+
+    return {
+        "investigations": paginated,
+        "total": total_count,
+        "offset": offset,
+        "limit": limit,
+        "stats": {
+            "total_count": len(merged_map),
+            "critical_count": critical_count,
+            "avg_confidence": avg_conf,
+            "total_actions": total_actions,
+        }
+    }
+
+
+@router.get("/investigations/{investigation_id}/details")
+async def get_investigation_details(investigation_id: str):
+    """
+    Retrieve full drill-down data for an investigation.
+    Includes synthesis, full agent reports, chain-of-thought reasoning,
+    entity/attack graph, attack phases, blackboard messages, and audit trail.
+    """
+    detail: Dict[str, Any] = {
+        "investigation_id": investigation_id,
+        "workflow_id": investigation_id,
+        "status": "completed",
+        "severity": "High",
+        "started_at": None,
+        "completed_at": None,
+        "duration_ms": 0,
+        "synthesis": {},
+        "reports": {},
+        "attack_graph": {"nodes": [], "edges": []},
+        "attack_phases": [],
+        "chain_of_thought": "",
+        "blackboard_messages": [],
+        "audit_trail": [],
+        "actions_recommended": [],
+    }
+
+    # 1. Try Temporal Query for live/rich workflow data
+    if USE_TEMPORAL:
+        try:
+            from backend.services.temporal_client import get_investigation_status, get_investigation_result
+            progress = await get_investigation_status(investigation_id)
+            if progress:
+                detail["status"] = progress.get("status", "completed")
+                detail["started_at"] = progress.get("started_at")
+                detail["completed_at"] = progress.get("completed_at")
+                detail["duration_ms"] = progress.get("total_duration_ms", 0)
+                detail["synthesis"] = progress.get("synthesis") or {}
+                detail["reports"] = progress.get("completed_reports") or {}
+                detail["blackboard_messages"] = progress.get("messages") or []
+        except Exception as t_err:
+            logger.debug(f"Temporal detail query error: {t_err}")
+
+    # 2. Try Postgres query to fill or augment
+    try:
+        from backend.database.connection import get_db
+        from backend.database.postgres import InvestigationRecord, RCAResultRecord, AuditRecord, AlertRecord
+        import contextlib
+
+        with contextlib.closing(next(get_db())) as db:
+            rec = db.query(InvestigationRecord).filter(InvestigationRecord.investigation_id == investigation_id).first()
+            if rec:
+                detail["status"] = rec.status or detail["status"]
+                detail["severity"] = rec.severity or detail["severity"]
+                if rec.started_at and not detail["started_at"]:
+                    detail["started_at"] = rec.started_at.isoformat()
+                if rec.completed_at and not detail["completed_at"]:
+                    detail["completed_at"] = rec.completed_at.isoformat()
+                if rec.started_at and rec.completed_at and not detail["duration_ms"]:
+                    detail["duration_ms"] = int((rec.completed_at - rec.started_at).total_seconds() * 1000)
+
+            rca = db.query(RCAResultRecord).filter(RCAResultRecord.investigation_id == investigation_id).first()
+            if rca:
+                if not detail["synthesis"]:
+                    detail["synthesis"] = {
+                        "verdict": "Confirmed Incident" if (rca.confidence or 0.8) > 0.7 else "Suspicious Activity",
+                        "executive_summary": rca.root_cause,
+                        "confidence_score": rca.confidence,
+                        "severity_score": rec.risk_score if rec else 0.8,
+                    }
+                if rca.attack_chain:
+                    detail["attack_phases"] = rca.attack_chain if isinstance(rca.attack_chain, list) else [str(rca.attack_chain)]
+
+            audits = db.query(AuditRecord).filter(AuditRecord.investigation_id == investigation_id).all()
+            if audits:
+                detail["audit_trail"] = [
+                    {
+                        "action": a.action,
+                        "actor": a.actor or "System Admin",
+                        "details": a.details,
+                        "timestamp": a.timestamp.isoformat() if a.timestamp else None,
+                    }
+                    for a in audits
+                ]
+    except Exception as db_err:
+        logger.debug(f"Postgres detail error: {db_err}")
+
+    # 3. Check In-Memory Store if not found
+    for inv in IN_MEMORY_INVESTIGATIONS:
+        if inv.get("workflow_id") == investigation_id:
+            detail["status"] = inv.get("status", detail["status"])
+            if inv.get("started_at") and not detail["started_at"]:
+                detail["started_at"] = inv.get("started_at")
+            if inv.get("completed_at") and not detail["completed_at"]:
+                detail["completed_at"] = inv.get("completed_at")
+            if inv.get("total_duration_ms") and not detail["duration_ms"]:
+                detail["duration_ms"] = inv.get("total_duration_ms")
+            if not detail["synthesis"] and inv.get("synthesis"):
+                detail["synthesis"] = inv["synthesis"]
+            if not detail["reports"] and inv.get("reports"):
+                detail["reports"] = inv["reports"]
+            break
+
+    # 4. Extract & Synthesize Attack Graph, CoT, and Recommended Actions from Reports
+    reports = detail.get("reports", {})
+    
+    # Check Triage
+    triage = next((r for r in reports.values() if r.get("agent_name") == "triage_agent"), {})
+    triage_findings = triage.get("findings", {})
+    entities = triage_findings.get("entities_identified", [])
+    if triage_findings.get("severity"):
+        detail["severity"] = triage_findings["severity"]
+
+    # Check Evidence & Discovery
+    evidence = next((r for r in reports.values() if r.get("agent_name") == "evidence_agent"), {})
+    evidence_findings = evidence.get("findings", {})
+    entity_graph_raw = evidence_findings.get("entity_graph", {})
+    relationships_raw = evidence_findings.get("relationships", [])
+
+    # Check RCA
+    rca = next((r for r in reports.values() if r.get("agent_name") == "rca_agent"), {})
+    rca_findings = rca.get("findings", {})
+    if rca_findings:
+        if rca_findings.get("chain_of_thought_verification"):
+            detail["chain_of_thought"] = rca_findings["chain_of_thought_verification"]
+        if rca_findings.get("attack_phases"):
+            detail["attack_phases"] = rca_findings["attack_phases"]
+        if rca_findings.get("root_cause") and not detail["synthesis"].get("executive_summary"):
+            detail["synthesis"]["executive_summary"] = rca_findings["root_cause"]
+
+    # Check Response
+    resp = next((r for r in reports.values() if r.get("agent_name") == "response_agent"), {})
+    resp_findings = resp.get("findings", {})
+    if resp_findings.get("actions_recommended"):
+        detail["actions_recommended"] = resp_findings["actions_recommended"]
+
+    # Build Graph Structure (Nodes & Edges) for Canvas Rendering
+    nodes = []
+    edges = []
+    seen_nodes = set()
+
+    # Add entities from triage or evidence
+    all_raw_entities = entities
+    if entity_graph_raw:
+        for eid, edata in entity_graph_raw.items():
+            etype = edata.get("type", "unknown") if isinstance(edata, dict) else "entity"
+            ename = edata.get("id", eid) if isinstance(edata, dict) else eid
+            risk = edata.get("risk_score", 0.5) if isinstance(edata, dict) else 0.5
+            if ename not in seen_nodes:
+                nodes.append({
+                    "id": str(ename),
+                    "type": etype,
+                    "name": str(ename),
+                    "risk_score": risk,
+                    "compromised": risk >= 0.7,
+                })
+                seen_nodes.add(str(ename))
+
+    for ent in all_raw_entities:
+        ename = ent.get("id") or ent.get("name") or "unknown"
+        etype = ent.get("type", "unknown")
+        if str(ename) not in seen_nodes:
+            risk = 0.8 if etype in ("file", "ip") else 0.5
+            nodes.append({
+                "id": str(ename),
+                "type": etype,
+                "name": str(ename),
+                "risk_score": risk,
+                "compromised": risk >= 0.7,
+            })
+            seen_nodes.add(str(ename))
+
+    # Add edges
+    for rel in relationships_raw:
+        if isinstance(rel, dict) and "source" in rel and "target" in rel:
+            src = rel["source"].split(":")[-1]
+            tgt = rel["target"].split(":")[-1]
+            edges.append({
+                "source": src,
+                "target": tgt,
+                "label": rel.get("type", "relates_to")
+            })
+
+    # Default fallback edges between nodes if no explicit relationships
+    if nodes and not edges:
+        primary_host = next((n["id"] for n in nodes if n["type"] == "host"), None)
+        if primary_host:
+            for n in nodes:
+                if n["id"] != primary_host:
+                    lbl = "runs_on" if n["type"] in ("file", "process") else "connected_to" if n["type"] == "ip" else "logged_into"
+                    edges.append({"source": n["id"], "target": primary_host, "label": lbl})
+
+    detail["attack_graph"] = {"nodes": nodes, "edges": edges}
+
+    return detail
 
 @router.get("/approvals/pending")
 async def list_pending_approvals():

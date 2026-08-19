@@ -125,8 +125,8 @@ class RCAEngineIntegration:
         """
         self.topology_path = topology_path
         self.topology = None
-        self.rca_config = RCAConfig()
-        print("✅ sx-truerca CausalAnalyzer loaded successfully")
+        import logging
+        logging.getLogger("rca-engine").info("[OK] sx-truerca CausalAnalyzer loaded successfully")
     
     async def analyze_investigation(self,
                                    investigation_package: Any) -> RCAResult:

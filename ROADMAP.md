@@ -311,7 +311,7 @@ All endpoints are open. `CORS: allow_origins=["*"]`. No login, no API keys, no r
   - Show affected entities with risk scores
   - Show playbook section that informed the recommendation
   - Add "Modify" option to let the analyst edit the action list
-- [ ] **Investigation history dashboard**
+- [x] **Investigation history dashboard**
   - List all past investigations with status, severity, duration, and outcome
   - Click to drill into full agent reports, entity graph, and attack chain
   - Filter by date range, severity, classification, status
@@ -414,7 +414,7 @@ All endpoints are open. `CORS: allow_origins=["*"]`. No login, no API keys, no r
 | ✅ Done | Unify orchestrator implementations (Gap H) | Medium | Medium |
 | 🟡 P1 | Approval timeout & escalation (Gap I) | Medium | Low |
 | ✅ Done | Rich approval cards with action details (Gap J) | High | Medium |
-| 🟡 P1 | Investigation history dashboard (Gap K) | High | Medium |
+| ✅ Done | Investigation history dashboard & search (Gap K) | High | Medium |
 | ✅ Done | Activate database persistence | High | Medium |
 | ✅ Done | Section-aware playbook chunking | High | Low |
 | ✅ Done | Human-in-the-Loop approval gates | High | High |
@@ -446,3 +446,4 @@ All endpoints are open. `CORS: allow_origins=["*"]`. No login, no API keys, no r
 | Unify Orchestrator Logic (Gap H) | 2026-08-18 | Extracted shared pipeline logic to `pipeline_core.py` |
 | Structured Response & Rich UI (Gap J) | 2026-08-18 | ResponsePlanner produces JSON actions, parsed by UI into Rich Approval Cards |
 | Inter-Agent Communication (Gap C) | 2026-08-18 | Added LLM message bus schema and removed hardcoded python communication simulations |
+| Investigation History & Explorer (Gap K) | 2026-08-19 | Search toolbar, KPI stats, 4-tab drill-down panel, CoT reasoning logs, and Canvas attack graph |
