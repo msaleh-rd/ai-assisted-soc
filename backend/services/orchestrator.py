@@ -142,8 +142,9 @@ class TriageAgent(BaseAgent):
             findings["entity_count"] = len(findings["entities_identified"])
             findings["prompt_version"] = prompt_manager.get_prompt_metadata("triage")["version"]
             
-            # Only 0.95 confidence if we found grounded entities
-            confidence = 0.95 if findings["entity_count"] > 0 else 0.50
+            # Read dynamic confidence from the LLM, but penalize heavily if no entities were grounded
+            llm_conf = findings.get("confidence", 0.50)
+            confidence = llm_conf if findings["entity_count"] > 0 else min(llm_conf, 0.40)
             
             # Update context
             context.entities = findings.get("entities_identified", [])
@@ -390,11 +391,33 @@ class RCAAnalystAgent(BaseAgent):
 
         messages_json = json.dumps([m.to_dict() for m in context.messages], indent=2) if context.use_ai_planner else "[]"
 
+        # Fetch historical context (Memory across investigations)
+        historical_context = "No previous investigations found."
+        try:
+            from backend.services.temporal_client import list_investigations, get_investigation_result
+            past_invs = await list_investigations(limit=3)
+            completed_invs = [inv for inv in past_invs if inv["status"] == "completed"]
+            if completed_invs:
+                history_texts = []
+                for inv in completed_invs:
+                    try:
+                        res = await get_investigation_result(inv["workflow_id"])
+                        if res and "synthesis" in res:
+                            summary = res["synthesis"].get("executive_summary", "")
+                            history_texts.append(f"- [{inv['workflow_id']}]: {summary}")
+                    except Exception:
+                        pass
+                if history_texts:
+                    historical_context = "\n".join(history_texts)
+        except Exception as e:
+            pass # Fail gracefully if Temporal is unavailable
+
         system_prompt = prompt_manager.get_system_prompt("rca")
         user_prompt = prompt_manager.build_user_prompt(
             "rca", 
             classification=classification, 
             entity_graph_json=json.dumps(entity_graph, indent=2),
+            historical_context=historical_context,
             messages_json=messages_json
         )
         prompt = f"{system_prompt}\n\n{user_prompt}"

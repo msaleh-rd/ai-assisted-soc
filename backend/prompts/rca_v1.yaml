@@ -10,20 +10,24 @@ system_prompt: |
   1. Identify the root cause of the incident in a concise sentence.
   2. Reconstruct the attack chain as a sequential list of phases the attacker took (e.g., "Initial access via phishing email", "Credential harvesting", "Lateral movement to DC").
   3. Estimate the blast radius — the number of distinct entities (hosts, users, IPs) that are impacted.
-  4. Provide a confidence score between 0.0 and 1.0 reflecting how certain you are in this analysis.
-  5. If the evidence is insufficient to determine the full attack chain (e.g. confidence < 0.7), use the `agent_messages` field to emit a `REQUEST_EVIDENCE` message targeting `evidence_agent`. Include the entity IDs you need more data on in the payload. Do not guess or speculate if evidence is missing.
+  5. Provide a chain-of-thought verification step to cross-reference your attack phases against the evidence and point out any gaps.
+  6. Provide a confidence score between 0.0 and 1.0 reflecting how certain you are in this analysis. Lower your confidence if your chain-of-thought verification identifies gaps.
+  7. If the evidence is insufficient to determine the full attack chain (e.g. confidence < 0.7), use the `agent_messages` field to emit a `REQUEST_EVIDENCE` message targeting `evidence_agent`. Include the entity IDs you need more data on in the payload. Do not guess or speculate if evidence is missing.
 
-  Base your analysis strictly on the evidence in the entity graph. Do not speculate beyond the data.
+  Base your analysis strictly on the evidence in the entity graph and the provided historical context. Do not speculate beyond the data.
 
 user_template: |
   Perform Root Cause Analysis on the following entity graph and classification '{classification}'.
 
   Entity Graph: {entity_graph_json}
 
+  Historical Context (Past Investigations sharing entities):
+  {historical_context}
+
   Blackboard Messages (Context from previous iterations/agents):
   {messages_json}
 
-  Determine the root cause, attack phases, and blast radius.
+  Determine the root cause, attack phases, and blast radius. Ensure you perform a chain_of_thought_verification first.
 
 few_shot_examples:
   - input: |
@@ -35,6 +39,7 @@ few_shot_examples:
       }
     output: |
       {
+        "chain_of_thought_verification": "Payload.exe is associated with jsmith and WORKSTATION-042. This confirms execution. We lack evidence of how payload.exe arrived, so initial access is an assumption. Confidence is slightly reduced due to missing delivery vector.",
         "root_cause": "User jsmith downloaded and executed a malicious file (payload.exe) on WORKSTATION-042, likely from a phishing email or drive-by download.",
         "attack_phases": [
           "Initial access: Malicious file payload.exe delivered to user jsmith's Downloads folder",

@@ -11,6 +11,7 @@ system_prompt: |
   4. Extract all identifiable entities (users, hosts, IPs, files, processes, domains) from the raw alert data.
   5. Determine whether immediate action is required.
   6. Write a 1-2 sentence human-readable assessment.
+  7. Provide a confidence score (0.0 to 1.0) indicating how clear and unambiguous the alert data is.
 
   Be precise and extract entities exactly as they appear in the alert data.
 
@@ -48,5 +49,6 @@ few_shot_examples:
           {"type": "file", "id": "payload.exe"}
         ],
         "requires_immediate_action": true,
-        "initial_assessment": "High-severity malware execution detected on WORKSTATION-042. User jsmith executed a suspicious file payload.exe. Immediate containment recommended."
+        "initial_assessment": "High-severity malware execution detected on WORKSTATION-042. User jsmith executed a suspicious file payload.exe. Immediate containment recommended.",
+        "confidence": 0.95
       }

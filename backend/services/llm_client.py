@@ -66,6 +66,7 @@ class TriageOutput(BaseModel):
     entities_identified: List[Entity] = Field(description="List of entities extracted from the raw alert")
     requires_immediate_action: bool = Field(description="True if the alert severity is High or Critical")
     initial_assessment: str = Field(description="A 1-2 sentence human-readable summary of the alert")
+    confidence: float = Field(description="Confidence score between 0.0 and 1.0 reflecting certainty in this triage assessment", ge=0.0, le=1.0)
 
 
 class InterAgentMessage(BaseModel):
@@ -75,9 +76,10 @@ class InterAgentMessage(BaseModel):
     reason: str = Field(description="Why you are sending this message.")
 
 class RCAOutput(BaseModel):
-    """Schema for the RCAAnalystAgent's structured output."""
-    root_cause: str = Field(description="A concise string explaining the root cause of the incident")
-    attack_phases: List[str] = Field(description="A sequential list of steps or phases the attacker took")
+    """Schema for the RCAAgent's structured output."""
+    chain_of_thought_verification: str = Field(description="Step-by-step verification of how the evidence supports the attack phases. Point out any gaps, contradictions, or missing evidence.")
+    root_cause: str = Field(description="One sentence summary of the root cause")
+    attack_phases: List[str] = Field(description="Sequential list of attack phases reconstructed from evidence")
     blast_radius: int = Field(description="The estimated number of impacted entities based on the evidence")
     confidence: float = Field(description="Confidence score between 0.0 and 1.0 in this analysis")
     agent_messages: List[InterAgentMessage] = Field(default_factory=list, description="Optional. Send messages to other agents to request missing evidence.")

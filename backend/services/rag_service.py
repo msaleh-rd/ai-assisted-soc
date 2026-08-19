@@ -78,7 +78,7 @@ def get_retriever():
 def search_playbook(
     query: str,
     classification: Optional[str] = None,
-    k: int = 6,
+    k: int = 20,
 ) -> List[Document]:
     """Section-aware playbook retrieval with optional classification filtering.
 

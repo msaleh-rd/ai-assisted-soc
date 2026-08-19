@@ -224,16 +224,16 @@ All endpoints are open. `CORS: allow_origins=["*"]`. No login, no API keys, no r
 *Goal: Transform the linear pipeline into a true multi-agent reasoning system.*
 *Priority: 🔴 P0 — This is what makes it "AI-Assisted" vs "AI-Decorated".*
 
-- [ ] **Adaptive re-investigation loop**
+- [x] **Adaptive re-investigation loop**
   - If RCA confidence < 0.7, automatically trigger a second round of evidence collection
   - Allow the RCA agent to request specific additional data from the Evidence agent
   - Cap at 3 iterations to prevent infinite loops
   - Track confidence improvement across iterations
-- [ ] **Dynamic planning with LLM**
+- [x] **Dynamic planning with LLM**
   - Use the LLM to generate the investigation plan based on the alert type
   - Different alerts should produce different agent configurations
   - Allow the plan to be modified mid-investigation when new evidence emerges
-- [ ] **Inter-agent communication via shared context bus**
+- [x] **Inter-agent communication via shared context bus**
   - Create an `InvestigationContext` object that all agents can read/write
   - Agents can post questions that other agents answer in subsequent phases
   - The Evidence agent can receive "additional queries" from the RCA agent
@@ -271,7 +271,7 @@ All endpoints are open. `CORS: allow_origins=["*"]`. No login, no API keys, no r
 - [ ] **Rate limiting for LLM endpoints**
   - Add a token bucket rate limiter for the LM Studio endpoint
   - Queue requests during bursts instead of failing
-- [ ] **Prompt evaluation harness (CI-grade)**
+- [x] **Prompt evaluation harness (CI-grade)**
   - 10+ test scenarios with ground-truth expected outputs
   - Automated scoring: entity extraction accuracy, classification accuracy, action quality
   - Run on every prompt YAML change before merge
@@ -405,9 +405,9 @@ All endpoints are open. `CORS: allow_origins=["*"]`. No login, no API keys, no r
 | Priority | Item | Impact | Effort |
 |---|---|---|---|
 | 🔴 P0 | Wire Evidence/Compression agents to real engines (Gap A) | Critical | Medium |
-| 🔴 P0 | Adaptive re-investigation loop (Gap B) | Critical | High |
+| ✅ Done | Adaptive re-investigation loop (Gap B) | Critical | High |
 | ✅ Done | Inter-agent communication / shared context (Gap C) | Critical | High |
-| 🔴 P0 | Dynamic AI-driven planning (Gap D) | High | Medium |
+| ✅ Done | Dynamic AI-driven planning (Gap D) | High | Medium |
 | 🟡 P1 | Confidence calibration & hallucination detection (Gap E) | High | Medium |
 | 🟡 P1 | Include few-shot examples in LLM calls (Gap F) | High | Low |
 | 🟡 P1 | LLM observability & call logging (Gap G) | High | Medium |
