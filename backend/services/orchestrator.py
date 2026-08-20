@@ -199,9 +199,10 @@ class EvidenceAgent(BaseAgent):
                 ent = {"type": "unknown", "id": ent}
             all_entities.append(ent)
             
+        inv_id = getattr(context, "investigation_id", None) or context.alert_data.get("alert_id", "inv-unknown")
         evidence_context = await orchestrator.collect_for_entities(
             entities_data=all_entities,
-            investigation_id=context.investigation_id
+            investigation_id=inv_id
         )
         
         # Build entity graph from identified entities
@@ -705,7 +706,7 @@ class ResponsePlannerAgent(BaseAgent):
     async def execute(self, inputs: Dict[str, Any], context: InvestigationContext) -> AgentReport:
         start = time.time()
         root_cause = context.rca_findings.get("root_cause", "")
-        attack_chain = context.rca_findings.get("attack_chain", [])
+        attack_chain = context.rca_findings.get("attack_phases") or context.rca_findings.get("attack_chain", [])
         entities = context.entities
 
         from backend.services.llm_client import get_llm, ResponseOutput
@@ -725,10 +726,13 @@ class ResponsePlannerAgent(BaseAgent):
             import asyncio
             docs = await asyncio.to_thread(search_playbook, query=query, classification=classification)
             
-            # Combine the content of the top retrieved chunks
-            playbook_context = "\n\n".join([doc.page_content for doc in docs]) if docs else "No specific playbook found."
+            # Combine the content of the top 3 retrieved sections to prevent context window overflow
+            top_docs = docs[:3] if docs else []
+            playbook_context = "\n\n".join([doc.page_content for doc in top_docs]) if top_docs else "No specific playbook found."
+            if len(playbook_context) > 2500:
+                playbook_context = playbook_context[:2500]
         except Exception as e:
-            playbook_context = f"Failed to retrieve playbooks (Vectorstore might be uninitialized): {str(e)}"
+            playbook_context = f"Failed to retrieve playbooks: {str(e)}"
 
         # 2. LLM Step: Plan response
         llm = get_llm(role="response")
