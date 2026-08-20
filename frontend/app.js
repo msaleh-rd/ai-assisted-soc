@@ -139,8 +139,343 @@ const ALERT_TEMPLATES = {
             trigger_time: new Date().toISOString(),
             description: '500MB outbound transfer to unknown external IP 198.51.100.77'
         }
+    },
+    cam_lds_ransomware: {
+        source: 'wazuh',
+        task: 'Investigate donotcry ransomware and C2 ingress on linuxshare',
+        alert: {
+            alert_id: 'cam_ransomware_003',
+            source: 'Suricata IDS / Wazuh',
+            severity: 5,
+            severity_name: 'Critical',
+            computer_name: 'linuxshare',
+            ip_address: '192.168.100.50',
+            user_name: 'root',
+            file_name: 'donotcry',
+            file_path: '/media/data/Images/donotcry',
+            description: 'Ransomware execution detected: install.sh downloaded from 192.42.1.174:8888, encrypting files in /media/data/Images',
+            timestamp: new Date().toISOString()
+        }
+    },
+    cam_lds_vnc: {
+        source: 'wazuh',
+        task: 'Investigate VNC brute force and credential dumping on inetfw',
+        alert: {
+            alert_id: 'cam_vnc_bruteforce_001',
+            source: 'Wazuh SIEM / Auditd',
+            severity: 4,
+            severity_name: 'High',
+            computer_name: 'inetfw',
+            ip_address: '192.168.100.23',
+            user_name: 'root',
+            file_name: 'Xvnc',
+            file_path: '/usr/bin/Xvnc',
+            description: 'Repeated VNC authentication failures on port 5901 from 192.42.1.174 followed by unauthorized /etc/shadow access',
+            timestamp: new Date().toISOString()
+        }
+    },
+    cam_lds_repo: {
+        source: 'auditd',
+        task: 'Investigate debian package tampering on reposerver',
+        alert: {
+            alert_id: 'cam_repo_poison_002',
+            source: 'Auditd / Wazuh',
+            severity: 5,
+            severity_name: 'Critical',
+            computer_name: 'reposerver',
+            ip_address: '192.168.100.15',
+            user_name: 'puppet',
+            file_name: 'healthcheckd',
+            file_path: '/var/packages/debian/healthcheckd.deb',
+            description: 'Unauthorized deb package modification and healthcheck_cron.sh script tampering on package repo server',
+            timestamp: new Date().toISOString()
+        }
+    },
+    apt29_raindrop: {
+        source: 'sysmon',
+        task: 'Investigate APT29 phishing and PowerShell execution on UserWorkstation',
+        alert: {
+            alert_id: 'apt29_step_002',
+            source: 'Sysmon / EDR',
+            severity: 5,
+            severity_name: 'Critical',
+            computer_name: 'UserWorkstation',
+            ip_address: '192.168.0.4',
+            user_name: 'vagrant',
+            file_name: 'raindrop.ps1',
+            file_path: 'C:\\Users\\vagrant\\raindrop.ps1',
+            description: 'PowerShell execution of raindrop.ps1 payload following suspicious email attachment launch from 192.168.0.2',
+            timestamp: new Date().toISOString()
+        }
     }
 };
+
+// Aliases for compatibility
+ALERT_TEMPLATES.splunk_exfil = ALERT_TEMPLATES.splunk_exfiltration;
+
+function loadOrchTemplate() {
+    const select = document.getElementById('orchAlertTemplate');
+    const textarea = document.getElementById('orchAlertJson');
+    const taskInput = document.getElementById('orchTask');
+    if (!select || !textarea) return;
+
+    const val = select.value;
+    const template = ALERT_TEMPLATES[val];
+    if (template) {
+        textarea.value = JSON.stringify(template.alert, null, 2);
+        if (taskInput) {
+            taskInput.value = template.task || `Investigate ${template.alert.description || 'security alert and recommend response'}`;
+        }
+    }
+}
+
+// Auto-load template on initial load
+document.addEventListener('DOMContentLoaded', () => {
+    loadOrchTemplate();
+});
+setTimeout(loadOrchTemplate, 100);
+
+let _orchEventSource = null;
+let _orchStartTime = 0;
+let _orchTimerInterval = null;
+
+async function runOrchestration() {
+    const startBtn = document.getElementById('orchStartBtn');
+    const panel = document.getElementById('orchPanel');
+    const statusBadge = document.getElementById('orchStatus');
+    const timerSpan = document.getElementById('orchTimer');
+    const reasoningDiv = document.getElementById('orchReasoning');
+    const dagDiv = document.getElementById('orchDag');
+    const logDiv = document.getElementById('orchLog');
+    const logCount = document.getElementById('orchLogCount');
+    const reportsGrid = document.getElementById('orchReportsGrid');
+    const synthesisPanel = document.getElementById('orchSynthesis');
+    const synthesisContent = document.getElementById('orchSynthesisContent');
+    const pendingBtn = document.getElementById('orchPendingBtn');
+
+    let alertData = {};
+    try {
+        alertData = JSON.parse(document.getElementById('orchAlertJson').value);
+    } catch (e) {
+        alert('Invalid JSON in Custom Alert field: ' + e.message);
+        return;
+    }
+
+    const task = document.getElementById('orchTask').value.trim() || 'Investigate security alert and recommend response';
+    const useAIPlanner = document.getElementById('orchUseAIPlanner')?.checked || false;
+
+    // Reset UI state
+    panel.style.display = 'block';
+    panel.scrollIntoView({ behavior: 'smooth' });
+    startBtn.disabled = true;
+    startBtn.textContent = 'Running Investigation...';
+    statusBadge.textContent = 'Initializing...';
+    statusBadge.className = 'orch-status-badge';
+    if (pendingBtn) pendingBtn.style.display = 'none';
+
+    reasoningDiv.textContent = '';
+    dagDiv.innerHTML = '';
+    logDiv.innerHTML = '';
+    reportsGrid.innerHTML = '';
+    synthesisPanel.style.display = 'none';
+
+    let eventCount = 0;
+    _orchStartTime = Date.now();
+    clearInterval(_orchTimerInterval);
+    _orchTimerInterval = setInterval(() => {
+        const elapsed = ((Date.now() - _orchStartTime) / 1000).toFixed(1);
+        if (timerSpan) timerSpan.textContent = `${elapsed}s`;
+    }, 100);
+
+    function addLogEntry(type, title, detail) {
+        eventCount++;
+        if (logCount) logCount.textContent = `${eventCount} events`;
+        const item = document.createElement('div');
+        item.className = 'orch-log-item';
+        item.style.cssText = 'padding: 6px 10px; border-bottom: 1px solid #1e293b; font-size: 0.82rem; display: flex; gap: 8px;';
+        const timeStr = new Date().toLocaleTimeString();
+        item.innerHTML = `
+            <span style="color: var(--text-muted); font-family: monospace;">[${timeStr}]</span>
+            <strong style="color: #60a5fa;">${title}</strong>
+            <span style="color: #cbd5e1; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${detail || ''}</span>
+        `;
+        logDiv.appendChild(item);
+        logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    function updateAgentCard(taskId, report) {
+        let card = document.getElementById(`orch-rep-${taskId}`);
+        if (!card) {
+            card = document.createElement('div');
+            card.id = `orch-rep-${taskId}`;
+            card.className = 'report-card';
+            reportsGrid.appendChild(card);
+        }
+        const findings = report.findings || {};
+        const confScore = report.confidence !== undefined ? Math.round(report.confidence * 100) : 90;
+        
+        card.innerHTML = `
+            <div class="report-card-header">
+                <span class="report-agent-name">${report.agent_name || taskId}</span>
+                <span class="report-confidence confidence-${confScore >= 80 ? 'high' : confScore >= 60 ? 'medium' : 'low'}">Conf: ${confScore}%</span>
+            </div>
+            <div class="report-task">${report.task || ''}</div>
+            <div class="report-findings">
+                ${findings.root_cause ? `<div style="color: #f8fafc; font-weight: 600; margin-bottom: 4px;">Root Cause: ${findings.root_cause}</div>` : ''}
+                ${findings.chain_of_thought_verification ? `<div class="hist-cot-box" style="font-size: 0.78rem;">${findings.chain_of_thought_verification}</div>` : ''}
+                <details style="margin-top: 6px;">
+                    <summary style="cursor: pointer; color: var(--text-muted); font-size: 0.75rem;">View findings payload</summary>
+                    <pre class="code-input" style="font-size: 0.75rem; margin-top: 4px; max-height: 150px; overflow-y: auto;">${JSON.stringify(findings, null, 2)}</pre>
+                </details>
+            </div>
+        `;
+    }
+
+    try {
+        const response = await fetch('/api/v3/orchestrator/investigate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task, alert_data: alertData, use_ai_planner: useAIPlanner })
+        });
+
+        if (!response.ok) {
+            throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+        }
+
+        let streamResponse = response;
+        const contentType = response.headers.get('content-type') || '';
+        
+        if (contentType.includes('application/json')) {
+            const startData = await response.json();
+            const workflowId = startData.workflow_id;
+            addLogEntry('temporal_start', 'Temporal Workflow Started', `Workflow ID: ${workflowId}`);
+            
+            // Connect to the workflow's SSE stream
+            streamResponse = await fetch(`/api/v3/orchestrator/investigate/${encodeURIComponent(workflowId)}/stream`);
+            if (!streamResponse.ok) {
+                throw new Error(`Failed to connect to workflow stream: ${streamResponse.statusText}`);
+            }
+        }
+
+        const reader = streamResponse.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            const lines = buffer.split('\n');
+            buffer = lines.pop(); // keep partial line
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (line.startsWith('event: ')) {
+                    const evtType = line.slice(7).trim();
+                    let dataLine = lines[i + 1];
+                    if (dataLine && dataLine.startsWith('data: ')) {
+                        i++;
+                        try {
+                            const data = JSON.parse(dataLine.slice(6));
+
+                            if (evtType === 'run_start') {
+                                statusBadge.textContent = 'Planning...';
+                                addLogEntry('run_start', 'Investigation Started', `Run ID: ${data.run_id}`);
+                            } else if (evtType === 'plan_created') {
+                                statusBadge.textContent = 'Executing Plan...';
+                                reasoningDiv.textContent = data.reasoning || '';
+                                addLogEntry('plan_created', 'Dynamic Plan Generated', `${data.total_phases} phases, ${data.total_tasks} tasks`);
+                                
+                                // Render DAG phases
+                                dagDiv.innerHTML = '';
+                                (data.phases || []).forEach(ph => {
+                                    const phCard = document.createElement('div');
+                                    phCard.style.cssText = 'background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 10px; min-width: 140px;';
+                                    phCard.innerHTML = `
+                                        <div style="font-size: 0.75rem; color: #94a3b8; font-weight: bold; margin-bottom: 4px;">Phase ${ph.phase_num}</div>
+                                        <div style="display: flex; flex-direction: column; gap: 4px;">
+                                            ${(ph.agents || []).map(a => `<span class="badge badge-blue" id="dag-agent-${a}">${a}</span>`).join('')}
+                                        </div>
+                                    `;
+                                    dagDiv.appendChild(phCard);
+                                });
+                            } else if (evtType === 'phase_start') {
+                                addLogEntry('phase_start', `Phase ${data.phase_num} Started`, `Agents: ${(data.agents || []).join(', ')}`);
+                            } else if (evtType === 'agent_start') {
+                                const badge = document.getElementById(`dag-agent-${data.agent_name}`);
+                                if (badge) { badge.className = 'badge badge-purple'; badge.textContent = `${data.agent_name} ⏳`; }
+                                addLogEntry('agent_start', `Agent Active: ${data.agent_name}`, data.description || '');
+                            } else if (evtType === 'agent_complete') {
+                                const badge = document.getElementById(`dag-agent-${data.agent_name}`);
+                                if (badge) { badge.className = 'badge badge-green'; badge.textContent = `${data.agent_name} ✓`; }
+                                addLogEntry('agent_complete', `Agent Finished: ${data.agent_name}`, `Task ID: ${data.task_id}`);
+                                if (data.report) updateAgentCard(data.task_id, data.report);
+                            } else if (evtType === 'adaptive_loop_start') {
+                                addLogEntry('adaptive_loop_start', `Adaptive Re-Investigation Loop (Iter ${data.iteration})`, data.reason);
+                            } else if (evtType === 'synthesis_start') {
+                                statusBadge.textContent = 'Synthesizing Findings...';
+                                addLogEntry('synthesis_start', 'Synthesizing Final Verdict', 'Reconstructing attack narrative');
+                            } else if (evtType === 'pending_approval') {
+                                statusBadge.textContent = 'Pending Human Approval Gate';
+                                statusBadge.className = 'orch-status-badge orch-status-pending';
+                                if (pendingBtn) {
+                                    pendingBtn.style.display = 'inline-block';
+                                    pendingBtn.onclick = () => {
+                                        document.querySelector('.nav-item[data-page="approvals"]')?.click();
+                                    };
+                                }
+                                addLogEntry('pending_approval', 'Human Approval Required', `Workflow ${data.workflow_id} waiting for containment authorization`);
+                            } else if (evtType === 'run_complete') {
+                                clearInterval(_orchTimerInterval);
+                                statusBadge.textContent = 'Completed';
+                                statusBadge.className = 'orch-status-badge orch-status-complete';
+                                addLogEntry('run_complete', 'Investigation Complete', `Total Duration: ${((data.total_duration_ms || 0) / 1000).toFixed(1)}s`);
+                                
+                                const synth = data.synthesis || {};
+                                synthesisPanel.style.display = 'block';
+                                synthesisContent.innerHTML = `
+                                    <div style="font-size: 1.1rem; font-weight: bold; color: #f8fafc; margin-bottom: 8px;">${synth.verdict || 'Investigation Complete'}</div>
+                                    <p style="color: #cbd5e1; font-size: 0.95rem; line-height: 1.6;">${synth.executive_summary || synth.root_cause || ''}</p>
+                                    ${synth.key_findings && synth.key_findings.length ? `
+                                        <div style="margin-top: 10px;">
+                                            <strong style="color: #94a3b8; font-size: 0.85rem;">Key Findings:</strong>
+                                            <ul style="padding-left: 20px; color: #cbd5e1; font-size: 0.88rem; margin-top: 4px;">
+                                                ${synth.key_findings.map(f => `<li>${f}</li>`).join('')}
+                                            </ul>
+                                        </div>
+                                    ` : ''}
+                                    ${synth.recommended_immediate_actions && synth.recommended_immediate_actions.length ? `
+                                        <div style="margin-top: 15px;">
+                                            <strong style="color: #34d399; font-size: 0.88rem;">Recommended Immediate Containment Actions:</strong>
+                                            <div style="display: flex; flex-direction: column; gap: 6px; margin-top: 6px;">
+                                                ${synth.recommended_immediate_actions.map(a => `
+                                                    <div style="background: #0f172a; border-left: 3px solid #34d399; padding: 6px 12px; border-radius: 0 4px 4px 0; font-size: 0.85rem;">
+                                                        <strong>[${(a.action_type || 'CONTAINMENT').toUpperCase()}]</strong> Target: <code>${a.target}</code> &mdash; ${a.description}
+                                                    </div>
+                                                `).join('')}
+                                            </div>
+                                        </div>
+                                    ` : ''}
+                                `;
+                            }
+                        } catch (err) {
+                            console.error('SSE JSON error', err, dataLine);
+                        }
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        clearInterval(_orchTimerInterval);
+        statusBadge.textContent = 'Error';
+        statusBadge.className = 'orch-status-badge orch-status-failed';
+        addLogEntry('error', 'Investigation Failed', e.message);
+    } finally {
+        startBtn.disabled = false;
+        startBtn.innerHTML = '&#9654; Run Agentic Investigation';
+    }
+}
 
 // === Sample Events for Compression ===
 function generateSampleEvents() {
@@ -798,77 +1133,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // === Agent Orchestrator ===
-const ORCH_TEMPLATES = {
-    crowdstrike_malware: {
-        source: 'crowdstrike',
-        severity_name: 'High',
-        severity: 4,
-        tactic: 'Execution',
-        technique_id: 'T1059.001',
-        alert: {
-            event_type: 'DetectionSummaryEvent',
-            severity: 4,
-            severity_name: 'High',
-            tactic: 'Execution',
-            technique_id: 'T1059.001',
-            user_name: 'jsmith',
-            computer_name: 'WS-FINANCE-042',
-            local_ip: '10.0.2.100',
-            file_name: 'payload.exe',
-            sha256: 'a1b2c3d4e5f6789012345678abcdef0123456789abcdef0123456789abcdef01',
-            command_line: 'cmd.exe /c powershell -ep bypass -f payload.ps1',
-        }
-    },
-    crowdstrike_lateral: {
-        source: 'crowdstrike',
-        severity_name: 'Critical',
-        severity: 5,
-        tactic: 'Lateral Movement',
-        technique_id: 'T1021.002',
-        alert: {
-            event_type: 'DetectionSummaryEvent',
-            severity: 5,
-            severity_name: 'Critical',
-            tactic: 'Lateral Movement',
-            technique_id: 'T1021.002',
-            user_name: 'admin_backup',
-            computer_name: 'DC-PRIMARY-01',
-            local_ip: '10.0.1.5',
-            file_name: 'psexec.exe',
-            sha256: 'deadbeef12345678deadbeef12345678deadbeef12345678deadbeef12345678',
-        }
-    },
-    splunk_bruteforce: {
-        source: 'splunk',
-        severity_name: 'High',
-        severity: 4,
-        tactic: 'Credential Access',
-        technique_id: 'T1110',
-        user: 'svc_monitoring',
-        hostname: 'AUTH-SERVER-01',
-        src_ip: '185.143.223.47',
-        alert: {
-            user_name: 'svc_monitoring',
-            computer_name: 'AUTH-SERVER-01',
-        }
-    },
-    splunk_exfil: {
-        source: 'splunk',
-        severity_name: 'Critical',
-        severity: 5,
-        tactic: 'Exfiltration',
-        technique_id: 'T1048',
-        user: 'dev_contractor',
-        hostname: 'DB-PROD-03',
-        src_ip: '10.0.5.88',
-        domain: 'exfil-drop.darkweb.cc',
-        alert: {
-            user_name: 'dev_contractor',
-            computer_name: 'DB-PROD-03',
-            local_ip: '10.0.5.88',
-        }
-    },
-};
+const ORCH_TEMPLATES = ALERT_TEMPLATES;
 
 let orchRunning = false;
 let orchTimerInterval = null;
@@ -876,10 +1141,19 @@ let orchStartTime = null;
 let orchEventCount = 0;
 
 function loadOrchTemplate() {
-    const templateKey = document.getElementById('orchAlertTemplate').value;
-    const alertData = ORCH_TEMPLATES[templateKey];
-    if (alertData) {
-        document.getElementById('orchAlertJson').value = JSON.stringify(alertData, null, 2);
+    const select = document.getElementById('orchAlertTemplate');
+    const textarea = document.getElementById('orchAlertJson');
+    const taskInput = document.getElementById('orchTask');
+    if (!select || !textarea) return;
+
+    const templateKey = select.value;
+    const template = ALERT_TEMPLATES[templateKey];
+    if (template) {
+        const alertObj = template.alert || template;
+        textarea.value = JSON.stringify(alertObj, null, 2);
+        if (taskInput) {
+            taskInput.value = template.task || `Investigate ${alertObj.description || 'security alert and recommend response'}`;
+        }
     }
 }
 

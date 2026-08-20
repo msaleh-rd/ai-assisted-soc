@@ -391,7 +391,7 @@ class InvestigationWorkflow:
             plan = await workflow.execute_activity(
                 "planner_activity",
                 args=[input.alert_data],
-                start_to_close_timeout=timedelta(seconds=90),
+                start_to_close_timeout=timedelta(seconds=180),
                 retry_policy=RetryPolicy(
                     initial_interval=timedelta(seconds=2),
                     maximum_attempts=2,
@@ -442,7 +442,7 @@ class InvestigationWorkflow:
                         workflow.execute_activity(
                             td["activity"],
                             args=[context_dict],
-                            start_to_close_timeout=timedelta(seconds=60),
+                            start_to_close_timeout=timedelta(seconds=180),
                             retry_policy=retry_policy,
                         )
                         for td in phase
@@ -487,7 +487,7 @@ class InvestigationWorkflow:
             result = await workflow.execute_activity(
                 task_def["activity"],
                 args=[context_dict],
-                start_to_close_timeout=timedelta(seconds=60),
+                start_to_close_timeout=timedelta(seconds=180),
                 retry_policy=retry_policy,
             )
             context_dict = result["context"]
@@ -512,7 +512,7 @@ class InvestigationWorkflow:
                         workflow.execute_activity(
                             td["activity"],
                             args=[context_dict],
-                            start_to_close_timeout=timedelta(seconds=60),
+                            start_to_close_timeout=timedelta(seconds=180),
                             retry_policy=retry_policy,
                         )
                         for td in plan[phase_idx]
@@ -533,7 +533,7 @@ class InvestigationWorkflow:
                 result = await workflow.execute_activity(
                     task_def["activity"],
                     args=[context_dict],
-                    start_to_close_timeout=timedelta(seconds=60),
+                    start_to_close_timeout=timedelta(seconds=180),
                     retry_policy=retry_policy,
                 )
                 context_dict = result["context"]
@@ -549,7 +549,7 @@ class InvestigationWorkflow:
                 result = await workflow.execute_activity(
                     task_def["activity"],
                     args=[context_dict],
-                    start_to_close_timeout=timedelta(seconds=60),
+                    start_to_close_timeout=timedelta(seconds=180),
                     retry_policy=retry_policy,
                 )
                 context_dict = result["context"]
@@ -578,7 +578,7 @@ class InvestigationWorkflow:
             result = await workflow.execute_activity(
                 task_def["activity"],
                 args=[context_dict],
-                start_to_close_timeout=timedelta(seconds=60),
+                start_to_close_timeout=timedelta(seconds=180),
                 retry_policy=retry_policy,
             )
             context_dict = result["context"]

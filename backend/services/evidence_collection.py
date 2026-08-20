@@ -14,6 +14,11 @@ from backend.models.entities import (
     RelationshipType,
     EntityFactory,
 )
+from backend.database.connection import SessionLocal
+from backend.database.postgres import EntityRecord, EventRecord
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class EvidenceCollector(ABC):
@@ -34,6 +39,29 @@ class EvidenceCollector(ABC):
         """
         pass
 
+    def _fetch_from_db(self, entity_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch real evidence from the Postgres database."""
+        if not SessionLocal:
+            return None
+            
+        db = SessionLocal()
+        try:
+            record = db.query(EntityRecord).filter_by(entity_id=entity_id).first()
+            if record:
+                return {
+                    'enrichment_data': record.enrichment_data or {},
+                    'threat_intel': record.threat_intel or {},
+                    'risk_score': record.risk_score or 0.0,
+                    'is_known_malicious': record.is_known_malicious or False,
+                    'is_suspicious': record.is_suspicious or False,
+                }
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching entity {entity_id} from DB: {e}")
+            return None
+        finally:
+            db.close()
+
 
 class UserEvidenceCollector(EvidenceCollector):
     """Collect user-related evidence."""
@@ -44,8 +72,11 @@ class UserEvidenceCollector(EvidenceCollector):
     async def collect(self, user_id: str,
                      context: Dict[str, Any]) -> Dict[str, Any]:
         """Collect user profile, activities, and risk indicators."""
-        # This would query actual systems (AD, Okta, etc.)
-        # For now, simulated data
+        db_record = self._fetch_from_db(user_id)
+        if db_record:
+            return db_record
+            
+        # Simulated data fallback
         return {
             'enrichment_data': {
                 'email': f"{user_id}@company.com",
@@ -76,7 +107,11 @@ class HostEvidenceCollector(EvidenceCollector):
     
     async def collect(self, host_id: str,
                      context: Dict[str, Any]) -> Dict[str, Any]:
-        """Collect host configuration, processes, and security posture."""
+        """Collect host information, posture, and risk."""
+        db_record = self._fetch_from_db(host_id)
+        if db_record:
+            return db_record
+            
         return {
             'enrichment_data': {
                 'os': 'Windows 10',
@@ -108,6 +143,10 @@ class ProcessEvidenceCollector(EvidenceCollector):
     async def collect(self, process_id: str,
                      context: Dict[str, Any]) -> Dict[str, Any]:
         """Collect process details, parents, and behavior."""
+        db_record = self._fetch_from_db(process_id)
+        if db_record:
+            return db_record
+            
         return {
             'enrichment_data': {
                 'signature_status': 'signed',
@@ -136,6 +175,10 @@ class IPAddressEvidenceCollector(EvidenceCollector):
     async def collect(self, ip_address: str,
                      context: Dict[str, Any]) -> Dict[str, Any]:
         """Collect IP geolocation, reputation, and threat data."""
+        db_record = self._fetch_from_db(ip_address)
+        if db_record:
+            return db_record
+            
         return {
             'enrichment_data': {
                 'geolocation': 'San Francisco, USA',
@@ -163,7 +206,11 @@ class DomainEvidenceCollector(EvidenceCollector):
     
     async def collect(self, domain: str,
                      context: Dict[str, Any]) -> Dict[str, Any]:
-        """Collect domain registration, DNS, and threat data."""
+        """Collect domain registration, reputation, and threat data."""
+        db_record = self._fetch_from_db(domain)
+        if db_record:
+            return db_record
+            
         return {
             'enrichment_data': {
                 'registrar': 'GoDaddy',
@@ -273,6 +320,66 @@ class EvidenceCollectionOrchestrator:
         initial_entities = self._extract_entities_from_alert(alert)
         
         # Collect evidence for each entity
+        await self._collect_evidence_recursive(
+            initial_entities,
+            context,
+            depth=0,
+            max_depth=max_depth
+        )
+        
+        return context
+    
+    async def collect_for_entities(self, entities_data: List[Dict[str, Any]],
+                                  investigation_id: str = "unknown",
+                                  max_depth: int = 2) -> Dict[str, Any]:
+        """
+        Collect evidence for a list of raw entity dictionaries.
+        
+        Args:
+            entities_data: List of dicts with 'type', 'id', and other attributes
+            investigation_id: The investigation ID
+            max_depth: Maximum entity expansion depth
+            
+        Returns:
+            Investigation context with entities, relationships, and enrichment
+        """
+        context = {
+            'investigation_id': investigation_id,
+            'alert_id': 'unknown',
+            'correlation_id': 'unknown',
+            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'entities': {},  # entity_id -> EntityNode
+            'relationships': [],  # List of EntityRelationship
+            'enrichment_data': {},  # entity_id -> enrichment dict
+        }
+        
+        initial_entities = []
+        for ent_data in entities_data:
+            ent_type_str = ent_data.get('type', 'unknown')
+            ent_id = ent_data.get('id', 'unknown')
+            ent_name = ent_data.get('name', ent_id)
+            
+            try:
+                ent_type = EntityType(ent_type_str.lower())
+            except ValueError:
+                # Fallback to a default if unknown, or continue
+                continue
+                
+            if ent_type == EntityType.USER:
+                entity = EntityFactory.create_user_entity(ent_id, ent_name, ent_data)
+            elif ent_type == EntityType.HOST:
+                entity = EntityFactory.create_host_entity(ent_id, ent_name, ent_data)
+            elif ent_type == EntityType.IP_ADDRESS:
+                entity = EntityFactory.create_ip_entity(ent_id, ent_data)
+            else:
+                entity = EntityNode(
+                    entity_id=ent_id,
+                    entity_type=ent_type,
+                    entity_name=ent_name,
+                    attributes=ent_data
+                )
+            initial_entities.append(entity)
+            
         await self._collect_evidence_recursive(
             initial_entities,
             context,

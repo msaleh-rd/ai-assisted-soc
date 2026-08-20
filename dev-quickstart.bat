@@ -11,13 +11,16 @@ echo.
 
 cd /d "%~dp0"
 
-REM 1. Start only the infrastructure in Docker (skips building the heavy API/Worker images)
-echo Starting infrastructure (Postgres, Neo4j, Redis, Temporal) with Docker Compose...
-docker-compose up -d postgres neo4j redis temporal temporal-postgresql temporal-admin-tools temporal-ui
-
-echo.
-echo Waiting for infrastructure to be ready (15 seconds)...
-timeout /t 15
+REM 1. Check if infrastructure is already running - e.g. Temporal on port 7233
+powershell -Command "if ((Test-NetConnection -ComputerName 127.0.0.1 -Port 7233 -InformationLevel Quiet -WarningAction SilentlyContinue)) { exit 0 } else { exit 1 }"
+if %ERRORLEVEL% EQU 0 (
+    echo [INFO] Infrastructure [Temporal and Postgres] is already running on port 7233! Skipping Docker startup.
+) else (
+    echo Starting infrastructure [Postgres, Redis, Temporal] with Docker Compose...
+    docker compose up -d postgres redis temporal temporal-postgresql temporal-admin-tools temporal-ui
+    echo Waiting for infrastructure to be ready...
+    timeout /t 10
+)
 
 REM 2. Start the local Temporal Worker in the background
 echo Starting local Temporal Worker...

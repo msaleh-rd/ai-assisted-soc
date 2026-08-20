@@ -36,6 +36,13 @@ async def main():
     from backend.database.connection import init_db
     init_db()
 
+    try:
+        from backend.services.rag_service import _load_vectorstore
+        _load_vectorstore()
+        logger.info("Pre-warmed FAISS vectorstore & embeddings")
+    except Exception as e:
+        logger.warning("Could not pre-warm RAG vectorstore: %s", e)
+
     client = await Client.connect(TEMPORAL_HOST, namespace=TEMPORAL_NAMESPACE)
 
     logger.info("Starting worker on task queue '%s'", TASK_QUEUE)

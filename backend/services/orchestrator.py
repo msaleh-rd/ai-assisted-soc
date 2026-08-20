@@ -190,36 +190,58 @@ class EvidenceAgent(BaseAgent):
             if msg.msg_type == "REQUEST_EVIDENCE":
                 targeted_entities.extend(msg.payload.get("entities", []))
         
+        # Mark pending requests as resolved
+        context.resolve_messages(pending_requests)
+
+        all_entities = []
+        for ent in entities + targeted_entities:
+            if isinstance(ent, str):
+                ent = {"type": "unknown", "id": ent}
+            all_entities.append(ent)
+            
+        evidence_context = await orchestrator.collect_for_entities(
+            entities_data=all_entities,
+            investigation_id=context.investigation_id
+        )
+        
         # Build entity graph from identified entities
         entity_graph = dict(context.entity_graph) if context.entity_graph else {}
         relationships = list(context.relationships) if context.relationships else []
         
-        # Mark pending requests as resolved
-        context.resolve_messages(pending_requests)
-
-        for ent in entities + targeted_entities:
-            # Handle string vs dict based on how it's passed
-            if isinstance(ent, str):
-                ent = {"type": "unknown", "id": ent}
-            eid = f"{ent.get('type', 'unknown')}:{ent.get('id', 'unknown')}"
+        for entity_node in evidence_context['entities'].values():
+            eid = f"{entity_node.entity_type.value if hasattr(entity_node.entity_type, 'value') else str(entity_node.entity_type)}:{entity_node.entity_id}"
             if eid not in entity_graph:
                 entity_graph[eid] = {
-                    "type": ent.get("type", "unknown"),
-                    "id": ent.get("id", "unknown"),
-                    "risk_score": 0.7 if ent.get("type") in ("file", "ip") else 0.4,
-                    "evidence_count": 3,
+                    "type": entity_node.entity_type.value if hasattr(entity_node.entity_type, 'value') else str(entity_node.entity_type),
+                    "id": entity_node.entity_id,
+                    "risk_score": entity_node.risk_score,
+                    "evidence_count": len(entity_node.enrichment_data) if entity_node.enrichment_data else 0,
+                    "enrichment": entity_node.enrichment_data,
+                    "threat_intel": entity_node.threat_intel,
+                    "attributes": entity_node.attributes,
                 }
-            # Create relationships between entities
-            if ent.get("type") == "process" and any(e.get("type") == "host" for e in entities):
-                host = next((e for e in entities if e.get("type") == "host"), None)
+                
+        # Handle relationships from evidence context
+        for rel in evidence_context.get('relationships', []):
+            relationships.append({
+                "source": rel.source_entity_id,
+                "target": rel.target_entity_id,
+                "type": rel.relationship_type.value if hasattr(rel.relationship_type, 'value') else str(rel.relationship_type)
+            })
+
+        # Add original heuristic relationships
+        for ent in all_entities:
+            eid = f"{ent.get('type', 'unknown')}:{ent.get('id', 'unknown')}"
+            if ent.get("type") == "process" and any(e.get("type") == "host" for e in all_entities):
+                host = next((e for e in all_entities if e.get("type") == "host"), None)
                 if host:
                     relationships.append({
                         "source": eid,
                         "target": f"host:{host['id']}",
                         "type": "runs_on"
                     })
-            if ent.get("type") == "user" and any(e.get("type") == "host" for e in entities):
-                host = next((e for e in entities if e.get("type") == "host"), None)
+            if ent.get("type") == "user" and any(e.get("type") == "host" for e in all_entities):
+                host = next((e for e in all_entities if e.get("type") == "host"), None)
                 if host:
                     relationships.append({
                         "source": eid,
@@ -245,7 +267,7 @@ class EvidenceAgent(BaseAgent):
                 "relationships": relationships,
                 "expansion_depth": 2,
                 "data_sources_queried": ["EDR", "SIEM", "Active Directory", "Threat Intel"],
-                "enrichment_summary": f"Expanded {len(entities)} seed entities into {len(entity_graph)} nodes with {len(relationships)} relationships.",
+                "enrichment_summary": f"Expanded {len(all_entities)} seed entities into {len(entity_graph)} nodes with {len(relationships)} relationships.",
             },
             confidence=0.9,
             artifacts=["entity_graph", "relationship_map", "evidence_timeline"],
