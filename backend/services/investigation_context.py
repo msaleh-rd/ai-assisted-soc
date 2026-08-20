@@ -40,12 +40,14 @@ class InvestigationContext:
     entity_graph: Dict[str, Any] = field(default_factory=dict)
     relationships: List[Dict[str, Any]] = field(default_factory=list)
     evidence: Dict[str, Any] = field(default_factory=dict)
+    raw_events: List[Dict[str, Any]] = field(default_factory=list)
     
     # Phase 3: Compression outputs
     compressed_events: Dict[str, Any] = field(default_factory=dict)
     
     # Phase 4: RCA outputs
     rca_findings: Dict[str, Any] = field(default_factory=dict)
+    causal_candidates: List[Dict[str, Any]] = field(default_factory=list)
     
     # Adaptive Loop / Communication state
     messages: List[AgentMessage] = field(default_factory=list)

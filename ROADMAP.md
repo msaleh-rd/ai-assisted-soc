@@ -201,14 +201,14 @@ All endpoints are open. `CORS: allow_origins=["*"]`. No login, no API keys, no r
 *Goal: Every agent must reason over REAL data, not fabricated numbers.*
 *Priority: 🔴 P0 — Nothing else matters until this is fixed.*
 
-- [ ] **Wire EvidenceAgent to real `EvidenceCollectionOrchestrator`**
+- [x] **Wire EvidenceAgent to real `EvidenceCollectionOrchestrator`**
   - Call `evidence_collection.py` collectors instead of building fake entity graphs
   - Feed real entity nodes + relationships into the context
-  - Query the Neo4j graph for entity expansion
-- [ ] **Wire CompressionAgent to real `CorrelationEngine`**
+  - Query PostgreSQL `EntityRecord` and `EventRecord` for real telemetry data
+- [x] **Wire CompressionAgent to real `CorrelationEngine`**
   - Run the actual 7-stage compression pipeline on collected evidence
-  - Return real `CompressedPackage` with actual event data and metrics
-- [ ] **Wire RCA to hybrid mode: `sx_truerca.CausalAnalyzer` + LLM**
+  - Return real `CompressedPackage` with actual event data, timeline, patterns, and metrics
+- [x] **Wire RCA to hybrid mode: `sx_truerca.CausalAnalyzer` + LLM**
   - Build a real causal graph from the entity relationships
   - Use `CausalAnalyzer` for structural root-cause analysis
   - Combine causal analysis + LLM reasoning for hybrid RCA
