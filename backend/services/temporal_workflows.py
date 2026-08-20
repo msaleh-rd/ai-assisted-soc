@@ -601,8 +601,16 @@ class InvestigationWorkflow:
         
         if actions_recommended:
             self._progress.status = "pending_approval"
-            await workflow.wait_condition(lambda: self._approval_decision is not None)
-            
+            try:
+                await workflow.wait_condition(
+                    lambda: self._approval_decision is not None,
+                    timeout=timedelta(hours=1)
+                )
+            except asyncio.TimeoutError:
+                self._approval_decision = "timed_out"
+                self._progress.status = "approval_timed_out"
+                workflow.logger.warning(f"HITL Approval gate timed out for workflow {run_id} after 1 hour.")
+
             if self._approval_decision == "approve":
                 self._progress.status = "executing_response"
                 try:
