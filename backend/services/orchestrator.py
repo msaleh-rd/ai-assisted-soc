@@ -652,90 +652,100 @@ class OrchestratorAgent:
             ],
         })
 
-        # --- EXECUTION PHASE ---
+        # --- DYNAMIC EXECUTION PHASE ---
         all_reports: Dict[str, AgentReport] = {}
         
-        # Execute Phase 1 (Triage)
-        phase_num = 1
-        task_def = plan.phases[0][0]
-        yield sse_event("phase_start", {"run_id": run_id, "phase_num": phase_num, "parallel": False, "agents": [task_def.agent_name]})
-        yield sse_event("agent_start", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "description": task_def.description, "parallel": False, "timestamp": datetime.now().isoformat()})
-        report = await self.agents[task_def.agent_name].execute({}, context)
-        all_reports[task_def.id] = report
-        yield sse_event("agent_complete", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "report": report.to_dict()})
-        yield sse_event("phase_complete", {"run_id": run_id, "phase_num": phase_num})
-
-        # Adaptive Loop for Evidence -> Compression -> RCA
-        looping = True
-        while looping:
-            context.confidence_history.append(context.rca_findings.get("confidence_score", 0.0))
+        for phase_idx, phase_tasks in enumerate(plan.phases):
+            phase_num = phase_idx + 1
+            is_parallel = len(phase_tasks) > 1
+            agent_names = [t.agent_name for t in phase_tasks]
             
-            # Execute Phase 2 (Evidence & Discovery)
-            phase_num = 2
-            is_parallel = True
-            yield sse_event("phase_start", {"run_id": run_id, "phase_num": phase_num, "parallel": is_parallel, "agents": [t.agent_name for t in plan.phases[1]]})
+            yield sse_event("phase_start", {
+                "run_id": run_id,
+                "phase_num": phase_num,
+                "parallel": is_parallel,
+                "agents": agent_names
+            })
+            
             coros = []
-            for task_def in plan.phases[1]:
-                yield sse_event("agent_start", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "description": task_def.description, "parallel": is_parallel, "timestamp": datetime.now().isoformat()})
-                agent = self.agents[task_def.agent_name]
-                coros.append(agent.execute({}, context))
-            results = await asyncio.gather(*coros, return_exceptions=True)
-            for task_def, result in zip(plan.phases[1], results):
-                report = result if not isinstance(result, Exception) else AgentReport(agent_name=task_def.agent_name, task=task_def.description, status=AgentStatus.FAILED, error=str(result))
-                all_reports[task_def.id] = report
-                yield sse_event("agent_complete", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "report": report.to_dict()})
-            yield sse_event("phase_complete", {"run_id": run_id, "phase_num": phase_num})
-
-            # Execute Phase 3 (Compression)
-            phase_num = 3
-            task_def = plan.phases[2][0]
-            yield sse_event("phase_start", {"run_id": run_id, "phase_num": phase_num, "parallel": False, "agents": [task_def.agent_name]})
-            yield sse_event("agent_start", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "description": task_def.description, "parallel": False, "timestamp": datetime.now().isoformat()})
-            try:
-                report = await self.agents[task_def.agent_name].execute({}, context)
-            except Exception as e:
-                report = AgentReport(agent_name=task_def.agent_name, task=task_def.description, status=AgentStatus.FAILED, error=str(e))
-            all_reports[task_def.id] = report
-            yield sse_event("agent_complete", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "report": report.to_dict()})
-            yield sse_event("phase_complete", {"run_id": run_id, "phase_num": phase_num})
-            
-            # Execute Phase 4 (RCA)
-            phase_num = 4
-            task_def = plan.phases[3][0]
-            yield sse_event("phase_start", {"run_id": run_id, "phase_num": phase_num, "parallel": False, "agents": [task_def.agent_name]})
-            yield sse_event("agent_start", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "description": task_def.description, "parallel": False, "timestamp": datetime.now().isoformat()})
-            try:
-                report = await self.agents[task_def.agent_name].execute({}, context)
-            except Exception as e:
-                report = AgentReport(agent_name=task_def.agent_name, task=task_def.description, status=AgentStatus.FAILED, error=str(e))
-            all_reports[task_def.id] = report
-            yield sse_event("agent_complete", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "report": report.to_dict()})
-            yield sse_event("phase_complete", {"run_id": run_id, "phase_num": phase_num})
-            
-            # Adaptive Loop Check
-            if context.needs_reinvestigation():
-                context.iteration += 1
-                yield sse_event("adaptive_loop_start", {
+            for task_def in phase_tasks:
+                yield sse_event("agent_start", {
                     "run_id": run_id,
-                    "iteration": context.iteration,
-                    "confidence": context.rca_findings.get("confidence_score", 0.0),
-                    "reason": "RCA confidence low or pending evidence requests, re-investigating..."
+                    "phase_num": phase_num,
+                    "agent_name": task_def.agent_name,
+                    "task_id": task_def.id,
+                    "description": task_def.description,
+                    "parallel": is_parallel,
+                    "timestamp": datetime.now().isoformat()
                 })
-            else:
-                looping = False
+                agent = self.agents.get(task_def.agent_name)
+                if agent:
+                    coros.append(agent.execute({}, context))
+                else:
+                    async def dummy_fail(name=task_def.agent_name, desc=task_def.description):
+                        return AgentReport(agent_name=name, task=desc, status=AgentStatus.FAILED, error=f"Unknown agent: {name}")
+                    coros.append(dummy_fail())
 
-        # Phase 5: Response
-        phase_num = 5
-        task_def = plan.phases[4][0]
-        yield sse_event("phase_start", {"run_id": run_id, "phase_num": phase_num, "parallel": False, "agents": [task_def.agent_name]})
-        yield sse_event("agent_start", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "description": task_def.description, "parallel": False, "timestamp": datetime.now().isoformat()})
-        try:
-            report = await self.agents[task_def.agent_name].execute({}, context)
-        except Exception as e:
-            report = AgentReport(agent_name=task_def.agent_name, task=task_def.description, status=AgentStatus.FAILED, error=str(e))
-        all_reports[task_def.id] = report
-        yield sse_event("agent_complete", {"run_id": run_id, "phase_num": phase_num, "agent_name": task_def.agent_name, "task_id": task_def.id, "report": report.to_dict()})
-        yield sse_event("phase_complete", {"run_id": run_id, "phase_num": phase_num})
+            if is_parallel:
+                results = await asyncio.gather(*coros, return_exceptions=True)
+                for task_def, result in zip(phase_tasks, results):
+                    report = result if not isinstance(result, Exception) else AgentReport(
+                        agent_name=task_def.agent_name, task=task_def.description,
+                        status=AgentStatus.FAILED, error=str(result)
+                    )
+                    all_reports[task_def.id] = report
+                    yield sse_event("agent_complete", {
+                        "run_id": run_id,
+                        "phase_num": phase_num,
+                        "agent_name": task_def.agent_name,
+                        "task_id": task_def.id,
+                        "report": report.to_dict()
+                    })
+            else:
+                for task_def, coro in zip(phase_tasks, coros):
+                    try:
+                        report = await coro
+                    except Exception as e:
+                        report = AgentReport(
+                            agent_name=task_def.agent_name, task=task_def.description,
+                            status=AgentStatus.FAILED, error=str(e)
+                        )
+                    all_reports[task_def.id] = report
+                    yield sse_event("agent_complete", {
+                        "run_id": run_id,
+                        "phase_num": phase_num,
+                        "agent_name": task_def.agent_name,
+                        "task_id": task_def.id,
+                        "report": report.to_dict()
+                    })
+            
+            yield sse_event("phase_complete", {"run_id": run_id, "phase_num": phase_num})
+
+            # If RCA Agent just executed and confidence is low, trigger adaptive re-investigation
+            if any(t.agent_name == "rca_agent" for t in phase_tasks):
+                while context.needs_reinvestigation():
+                    context.iteration += 1
+                    context.confidence_history.append(context.rca_findings.get("confidence_score", 0.0))
+                    yield sse_event("adaptive_loop_start", {
+                        "run_id": run_id,
+                        "iteration": context.iteration,
+                        "confidence": context.rca_findings.get("confidence_score", 0.0),
+                        "reason": "RCA confidence low or pending evidence requests, re-investigating..."
+                    })
+                    
+                    # Re-run Evidence and RCA
+                    re_evidence = self.agents["evidence_agent"]
+                    re_rca = self.agents["rca_agent"]
+                    try:
+                        ev_rep = await re_evidence.execute({}, context)
+                        all_reports[f"task-evidence-iter{context.iteration}"] = ev_rep
+                    except Exception as e:
+                        pass
+                    try:
+                        rca_rep = await re_rca.execute({}, context)
+                        all_reports[f"task-rca-iter{context.iteration}"] = rca_rep
+                    except Exception as e:
+                        pass
 
         # --- SYNTHESIS PHASE ---
         yield sse_event("synthesis_start", {
