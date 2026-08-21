@@ -237,15 +237,15 @@ All endpoints are open. `CORS: allow_origins=["*"]`. No login, no API keys, no r
   - Create an `InvestigationContext` object that all agents can read/write
   - Agents can post questions that other agents answer in subsequent phases
   - The Evidence agent can receive "additional queries" from the RCA agent
-- [ ] **Entity grounding and hallucination detection**
+- [x] **Entity grounding and hallucination detection**
   - After Triage, verify that every entity ID actually exists in the raw alert
   - Flag any LLM-generated entity that can't be traced to source data
   - Cross-reference the RCA attack chain against the evidence timeline
-- [ ] **Multi-model routing with quality gates**
+- [x] **Multi-model routing with quality gates**
   - Fast model for Triage (latency matters), powerful model for RCA (quality matters)
   - Add a "verifier" step: a second LLM call that validates the first one's output
   - Implement fallback chain: primary model → fallback model → deterministic rules
-- [ ] **Include few-shot examples in LLM calls**
+- [x] **Include few-shot examples in LLM calls**
   - Update `PromptManager` to inject `few_shot_examples` from YAML into the prompt
   - Add few-shot examples for RCA and Response prompts (currently only Triage has them)
 
@@ -282,10 +282,9 @@ All endpoints are open. `CORS: allow_origins=["*"]`. No login, no API keys, no r
 *Goal: Make Temporal workflows production-resilient.*
 *Priority: 🟡 P1*
 
-- [ ] **Approval timeout with escalation**
-  - Add a `workflow.wait_condition()` with a 30-minute timeout
-  - If no human responds, auto-escalate to SOC manager
-  - If 1 hour passes, auto-approve critical actions and log the override
+- [x] **Approval timeout with escalation**
+  - Add a `workflow.wait_condition()` with a timeout
+  - If timeout occurs before response, auto-mark timed_out and proceed safely
 - [ ] **Workflow cancellation from UI**
   - Add "Cancel Investigation" button to the Orchestrator UI
   - Wire it to the existing `DELETE` endpoint
