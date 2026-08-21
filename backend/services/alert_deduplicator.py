@@ -1,7 +1,6 @@
-"""Alert deduplication service."""
-
+import copy
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Tuple
 
 from backend.models.alert import (
@@ -53,7 +52,7 @@ class AlertDeduplicator:
                 parent_alert.severity = alert.severity
             
             # Merge primary entities
-            for entity_type, entity_data in alert.primary_entities.items():
+            for entity_type, entity_data in (alert.primary_entities or {}).items():
                 if entity_type not in parent_alert.primary_entities and entity_data:
                     parent_alert.primary_entities[entity_type] = entity_data
             
@@ -64,13 +63,14 @@ class AlertDeduplicator:
                 occurrence_count=parent_alert.occurrence_count
             )
         else:
-            # New alert
+            # New alert - store a copy so mutations outside don't corrupt state
+            stored_alert = copy.deepcopy(alert)
             self.alert_fingerprints[fingerprint] = alert.alert_id
-            self.recent_alerts[alert.alert_id] = alert
+            self.recent_alerts[alert.alert_id] = stored_alert
             
             return AlertDeduplicationResult(
                 is_duplicate=False,
-                normalized_alert=alert,
+                normalized_alert=stored_alert,
                 occurrence_count=1
             )
     
@@ -81,32 +81,34 @@ class AlertDeduplicator:
         Returns:
             Number of alerts cleaned up
         """
-        current_time = datetime.utcnow()
+        now_utc = datetime.now(timezone.utc)
         window_delta = timedelta(seconds=self.window_seconds)
         
         expired_alert_ids = []
         
-        for alert_id, alert in self.recent_alerts.items():
-            alert_time = datetime.fromisoformat(
-                alert.timestamp_received.replace('Z', '+00:00')
-            )
+        for alert_id, alert in list(self.recent_alerts.items()):
+            ts = alert.timestamp_received
+            if isinstance(ts, str):
+                alert_time = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+            elif isinstance(ts, datetime):
+                alert_time = ts
+            else:
+                alert_time = now_utc
             
-            if current_time - alert_time > window_delta:
+            if alert_time.tzinfo is None:
+                alert_time = alert_time.replace(tzinfo=timezone.utc)
+                
+            if (now_utc - alert_time) >= window_delta:
                 expired_alert_ids.append(alert_id)
         
         # Clean up
         for alert_id in expired_alert_ids:
-            del self.recent_alerts[alert_id]
+            if alert_id in self.recent_alerts:
+                del self.recent_alerts[alert_id]
             
-            # Find and remove fingerprint
-            fingerprint = None
-            for fp, aid in self.alert_fingerprints.items():
-                if aid == alert_id:
-                    fingerprint = fp
-                    break
-            
-            if fingerprint:
-                del self.alert_fingerprints[fingerprint]
+            fingerprints_to_del = [fp for fp, aid in self.alert_fingerprints.items() if aid == alert_id]
+            for fp in fingerprints_to_del:
+                del self.alert_fingerprints[fp]
         
         return len(expired_alert_ids)
     
@@ -121,16 +123,27 @@ class AlertDeduplicator:
         - Primary entities (user, host, IP)
         - Category
         """
+        primary_entities = alert.primary_entities or {}
+        user_ent = primary_entities.get('user', {})
+        host_ent = primary_entities.get('host', {})
+        
+        user_name = user_ent.get('name', '') if isinstance(user_ent, dict) else str(user_ent)
+        user_id = user_ent.get('id', '') if isinstance(user_ent, dict) else ''
+        host_name = host_ent.get('hostname', '') if isinstance(host_ent, dict) else str(host_ent)
+        host_id = host_ent.get('id', '') if isinstance(host_ent, dict) else ''
+        ip_val = primary_entities.get('ip', '')
+        remote_ip_val = primary_entities.get('remote_ip', '')
+
         key_fields = [
-            alert.source_name,
-            alert.alert_name,
-            alert.alert_category,
-            str(alert.primary_entities.get('user', {}).get('name', '')),
-            str(alert.primary_entities.get('user', {}).get('id', '')),
-            str(alert.primary_entities.get('host', {}).get('hostname', '')),
-            str(alert.primary_entities.get('host', {}).get('id', '')),
-            str(alert.primary_entities.get('ip', '')),
-            str(alert.primary_entities.get('remote_ip', '')),
+            str(alert.source_name),
+            str(alert.alert_name),
+            str(alert.alert_category),
+            str(user_name),
+            str(user_id),
+            str(host_name),
+            str(host_id),
+            str(ip_val),
+            str(remote_ip_val),
         ]
         
         fingerprint_str = '|'.join(key_fields)

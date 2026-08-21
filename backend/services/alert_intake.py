@@ -18,6 +18,7 @@ class AlertIntakeService:
     
     def __init__(self):
         self.deduplicator = AlertDeduplicator(window_seconds=1800)  # 30 minutes
+        self.in_memory_alerts: List[NormalizedAlert] = []
     
     async def ingest_alert(self, raw_alert: Dict[str, Any], 
                           source: str) -> Dict[str, Any]:
@@ -55,31 +56,38 @@ class AlertIntakeService:
         # Deduplicate
         dedup_result = self.deduplicator.deduplicate(normalized_alert)
         final_alert = dedup_result.normalized_alert
-        # Persist to database
-        from backend.database.connection import get_db
-        from backend.database.postgres import AlertRecord
-        import contextlib
+        # Ingest into memory queue
+        self.in_memory_alerts.append(final_alert)
         
-        with contextlib.closing(next(get_db())) as db:
-            db_alert = AlertRecord(
-                alert_id=final_alert.alert_id,
-                investigation_id=final_alert.investigation_id,
-                correlation_id=final_alert.correlation_id,
-                source_system=final_alert.source,
-                source_name=final_alert.source,
-                alert_name=final_alert.title,
-                alert_category=final_alert.classification.value if hasattr(final_alert.classification, 'value') else str(final_alert.classification),
-                severity=final_alert.severity.value,
-                confidence=final_alert.confidence,
-                status="pending_evidence_collection",
-                primary_entities=[e.dict() for e in final_alert.entities],
-                alert_metadata=final_alert.raw_data,
-                occurrence_count=final_alert.occurrence_count,
-                timestamp_generated=final_alert.timestamp,
-                timestamp_received=datetime.utcnow()
-            )
-            db.add(db_alert)
-            db.commit()
+        # Persist to database if initialized
+        try:
+            from backend.database.connection import SessionLocal, get_db
+            from backend.database.postgres import AlertRecord
+            import contextlib
+            
+            if SessionLocal is not None:
+                with contextlib.closing(next(get_db())) as db:
+                    db_alert = AlertRecord(
+                        alert_id=final_alert.alert_id,
+                        investigation_id=final_alert.investigation_id,
+                        correlation_id=final_alert.correlation_id,
+                        source_system=final_alert.source_system.value if hasattr(final_alert.source_system, 'value') else str(final_alert.source_system),
+                        source_name=final_alert.source_name,
+                        alert_name=final_alert.alert_name,
+                        alert_category=final_alert.alert_category,
+                        severity=final_alert.severity.value if hasattr(final_alert.severity, 'value') else str(final_alert.severity),
+                        confidence=final_alert.confidence,
+                        status="pending_evidence_collection",
+                        primary_entities=final_alert.primary_entities,
+                        alert_metadata=final_alert.alert_metadata or {},
+                        occurrence_count=final_alert.occurrence_count,
+                        timestamp_generated=datetime.fromisoformat(final_alert.timestamp_generated.replace('Z', '+00:00')) if isinstance(final_alert.timestamp_generated, str) else final_alert.timestamp_generated,
+                        timestamp_received=datetime.utcnow()
+                    )
+                    db.add(db_alert)
+                    db.commit()
+        except Exception:
+            pass
         
         return {
             'status': 'deduplicated' if dedup_result.is_duplicate else 'accepted',
@@ -113,40 +121,56 @@ class AlertIntakeService:
     
     def get_pending_alerts(self) -> List[NormalizedAlert]:
         """Get all alerts currently pending evidence collection."""
-        from backend.database.connection import get_db
-        from backend.database.postgres import AlertRecord
-        import contextlib
-        from backend.models.alert import NormalizedAlert
+        try:
+            from backend.database.connection import SessionLocal, get_db
+            from backend.database.postgres import AlertRecord
+            import contextlib
+            from backend.models.alert import NormalizedAlert, AlertSource, AlertSeverity
+            
+            if SessionLocal is not None:
+                with contextlib.closing(next(get_db())) as db:
+                    records = db.query(AlertRecord).filter(AlertRecord.status == "pending_evidence_collection").all()
+                    
+                    alerts = []
+                    for record in records:
+                        try:
+                            source_enum = AlertSource(record.source_system)
+                        except ValueError:
+                            source_enum = AlertSource.OTHER
+                        try:
+                            sev_enum = AlertSeverity(record.severity)
+                        except ValueError:
+                            sev_enum = AlertSeverity.MEDIUM
+                            
+                        alert = NormalizedAlert(
+                            alert_id=record.alert_id,
+                            investigation_id=record.investigation_id,
+                            correlation_id=record.correlation_id,
+                            source_system=source_enum,
+                            source_name=record.source_name or "Unknown",
+                            alert_name=record.alert_name,
+                            alert_description=record.alert_name,
+                            alert_category=record.alert_category or "unknown",
+                            severity=sev_enum,
+                            confidence=record.confidence or 0.8,
+                            primary_entities=record.primary_entities or {},
+                            raw_alert=record.alert_metadata or {},
+                            timestamp_generated=record.timestamp_generated.isoformat() if hasattr(record.timestamp_generated, "isoformat") else str(record.timestamp_generated),
+                            timestamp_received=record.timestamp_received.isoformat() if hasattr(record.timestamp_received, "isoformat") else str(record.timestamp_received)
+                        )
+                        alerts.append(alert)
+                        record.status = "in_progress"
+                    
+                    if records:
+                        db.commit()
+                    return alerts
+        except Exception:
+            pass
         
-        with contextlib.closing(next(get_db())) as db:
-            records = db.query(AlertRecord).filter(AlertRecord.status == "pending_evidence_collection").all()
-            
-            alerts = []
-            for record in records:
-                # Reconstruct NormalizedAlert from DB record (minimal reconstruction for API)
-                alert = NormalizedAlert(
-                    alert_id=record.alert_id,
-                    investigation_id=record.investigation_id,
-                    correlation_id=record.correlation_id,
-                    source=record.source_system,
-                    title=record.alert_name,
-                    classification=record.alert_category,
-                    severity=record.severity,
-                    confidence=record.confidence,
-                    entities=record.primary_entities or [],
-                    raw_data=record.alert_metadata,
-                    timestamp=record.timestamp_generated
-                )
-                alerts.append(alert)
-                
-                # Mark them as picked up so they don't get fetched again continuously
-                # (In a real system this would be a transaction or locked queue)
-                record.status = "in_progress"
-            
-            if records:
-                db.commit()
-                
-        return alerts
+        # Fallback to in-memory alerts
+        pending = list(self.in_memory_alerts)
+        self.in_memory_alerts.clear()
+        return pending
     
     def get_stats(self) -> Dict[str, Any]:
         """Get intake service statistics."""

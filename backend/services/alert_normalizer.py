@@ -82,7 +82,7 @@ class BaseAlertNormalizer(ABC):
             for entity_type, regex_list in patterns.items():
                 if any(self._regex_match(pattern, key_lower) for pattern in regex_list):
                     if self._is_valid_entity(entity_type, value):
-                        if entity_type not in entities:
+                        if entity_type not in entities or ('remote' in key_lower or 'dest' in key_lower or 'dst' in key_lower):
                             entities[entity_type] = value
                         break
         
