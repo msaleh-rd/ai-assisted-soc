@@ -129,7 +129,7 @@ services:
       - POSTGRES_USER=soc_user
       - POSTGRES_PASSWORD=soc_password
     ports:
-      - "5433:5432"
+      - "5435:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -160,7 +160,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis_data:/data
     healthcheck:

@@ -129,7 +129,7 @@ def get_database_url(
     if env_url:
         return env_url
     h = host or os.getenv("POSTGRES_HOST", "127.0.0.1")
-    p = port or int(os.getenv("POSTGRES_PORT", "5433"))
+    p = port or int(os.getenv("POSTGRES_PORT", "5435"))
     db = database or os.getenv("POSTGRES_DB", "soc_platform")
     u = user or os.getenv("POSTGRES_USER", "soc_user")
     pwd = password or os.getenv("POSTGRES_PASSWORD", "soc_password")
