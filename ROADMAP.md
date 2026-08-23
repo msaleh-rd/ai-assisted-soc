@@ -446,3 +446,4 @@ All endpoints are open. `CORS: allow_origins=["*"]`. No login, no API keys, no r
 | Structured Response & Rich UI (Gap J) | 2026-08-18 | ResponsePlanner produces JSON actions, parsed by UI into Rich Approval Cards |
 | Inter-Agent Communication (Gap C) | 2026-08-18 | Added LLM message bus schema and removed hardcoded python communication simulations |
 | Investigation History & Explorer (Gap K) | 2026-08-19 | Search toolbar, KPI stats, 4-tab drill-down panel, CoT reasoning logs, and Canvas attack graph |
+| Agentic Pluggable Skills Framework | 2026-08-23 | Universal SKILL.md engine, 23 skills across Triage/Evidence/Compression/Discovery, 102 unit/integration tests |
