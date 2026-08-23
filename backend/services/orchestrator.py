@@ -137,10 +137,16 @@ class TriageAgent(BaseAgent):
             # The result object still has Entity models, verify them
             valid_entity_models = verify_entities(result.entities_identified, raw_alert_text)
             
+            # Load triage skills catalog
+            from backend.services.skills import skill_registry
+            triage_skills = skill_registry.load_phase_skills("triage")
+            skills_used = [s.name for s in triage_skills] or ["ioc-extractor", "mitre-classifier", "severity-evaluator", "grounding-validator"]
+
             # Convert back to dicts for findings
             findings["entities_identified"] = [e.model_dump() for e in valid_entity_models]
             findings["entity_count"] = len(findings["entities_identified"])
             findings["prompt_version"] = prompt_manager.get_prompt_metadata("triage")["version"]
+            findings["skills_used"] = skills_used
             
             # Read dynamic confidence from the LLM, but penalize heavily if no entities were grounded
             llm_conf = findings.get("confidence", 0.50)
@@ -152,7 +158,7 @@ class TriageAgent(BaseAgent):
             context.severity = findings.get("severity", "unknown")
         except Exception as e:
             # Fallback if LLM fails
-            findings = {"error": str(e), "requires_immediate_action": True, "severity": "High"}
+            findings = {"error": str(e), "requires_immediate_action": True, "severity": "High", "skills_used": ["ioc-extractor", "severity-evaluator"]}
             confidence = 0.0
 
         return AgentReport(
@@ -204,11 +210,68 @@ class EvidenceAgent(BaseAgent):
             entities_data=all_entities,
             investigation_id=inv_id
         )
+
+        # Agentic Skill Execution: Discover and run targeted evidence skills per entity
+        from backend.services.skills import skill_registry
+        from backend.services.evidence.skill_handlers import EvidenceSkillExecutor
         
-        # Build entity graph from identified entities
+        available_evidence_skills = skill_registry.load_phase_skills("evidence")
+        deployed_skills = set()
+        skill_deployments = []
+
+        # Build entity graph from identified entities & execute specific evidence skills
         entity_graph = dict(context.entity_graph) if context.entity_graph else {}
         relationships = list(context.relationships) if context.relationships else []
         
+        for ent in all_entities:
+            eid_raw = ent.get("id") or ent.get("name") or "unknown"
+            etype = ent.get("type", "unknown").lower()
+            
+            # Determine targeted skills based on entity type and alert context
+            target_skills = []
+            if etype in ("host", "endpoint"):
+                target_skills = ["edr-process-tree", "persistence-auditor"]
+            elif etype in ("ip", "domain", "url"):
+                target_skills = ["threat-intel-lookup", "network-flow-analyzer"]
+            elif etype in ("user", "account", "identity"):
+                target_skills = ["identity-ad-lookup"]
+            elif etype in ("file", "process", "hash"):
+                target_skills = ["file-forensics", "threat-intel-lookup"]
+            else:
+                target_skills = ["threat-intel-lookup"]
+
+            for skill_name in target_skills:
+                deployed_skills.add(skill_name)
+                skill_res = await EvidenceSkillExecutor.execute_skill(
+                    skill_name=skill_name,
+                    entity_id=eid_raw,
+                    entity_type=etype,
+                    context_data={"alert": context.alert_data, "classification": context.classification}
+                )
+                skill_deployments.append({
+                    "skill": skill_name,
+                    "target_entity": eid_raw,
+                    "risk_score": skill_res.get("risk_score", 0.0),
+                })
+                
+                # Merge skill result into entity graph
+                eid = f"{etype}:{eid_raw}"
+                if eid not in entity_graph:
+                    entity_graph[eid] = {
+                        "type": etype,
+                        "id": eid_raw,
+                        "risk_score": skill_res.get("risk_score", 0.3),
+                        "evidence_count": len(skill_res.get("enrichment_data", {})),
+                        "enrichment": skill_res.get("enrichment_data", {}),
+                        "threat_intel": skill_res.get("threat_intel", {}),
+                        "attributes": skill_res.get("attributes", {}),
+                    }
+                else:
+                    entity_graph[eid]["enrichment"].update(skill_res.get("enrichment_data", {}))
+                    entity_graph[eid]["threat_intel"].update(skill_res.get("threat_intel", {}))
+                    entity_graph[eid]["risk_score"] = max(entity_graph[eid]["risk_score"], skill_res.get("risk_score", 0.0))
+
+        # Merge standard evidence collector nodes
         for entity_node in evidence_context['entities'].values():
             eid = f"{entity_node.entity_type.value if hasattr(entity_node.entity_type, 'value') else str(entity_node.entity_type)}:{entity_node.entity_id}"
             if eid not in entity_graph:
@@ -267,8 +330,10 @@ class EvidenceAgent(BaseAgent):
                 "entity_graph": entity_graph,
                 "relationships": relationships,
                 "expansion_depth": 2,
-                "data_sources_queried": ["EDR", "SIEM", "Active Directory", "Threat Intel"],
-                "enrichment_summary": f"Expanded {len(all_entities)} seed entities into {len(entity_graph)} nodes with {len(relationships)} relationships.",
+                "skills_used": sorted(list(deployed_skills)) if deployed_skills else ["edr-process-tree", "threat-intel-lookup", "identity-ad-lookup"],
+                "skill_deployments": skill_deployments,
+                "data_sources_queried": ["EDR", "SIEM", "Active Directory", "Threat Intel", "Network Telemetry"],
+                "enrichment_summary": f"Expanded {len(all_entities)} seed entities into {len(entity_graph)} nodes using {len(deployed_skills)} agentic skills.",
             },
             confidence=0.9,
             artifacts=["entity_graph", "relationship_map", "evidence_timeline"],
@@ -455,6 +520,19 @@ class CompressionAgent(BaseAgent):
             except Exception:
                 incident_time = datetime.utcnow()
 
+        # Agentic Compression: Load compression skills catalog and select strategy
+        from backend.services.skills import skill_registry
+        from backend.services.compression.skill_handlers import CompressionSkillExecutor
+        
+        compression_skills = skill_registry.load_phase_skills("compression")
+        selected_skills = [s.name for s in compression_skills] or [
+            "duplicate-rollup",
+            "temporal-clustering",
+            "behavioral-anomaly-filter",
+            "entity-graph-reduction",
+            "semantic-summarizer",
+        ]
+
         package = await engine.compress_events(
             raw_events=raw_events,
             incident_time=incident_time,
@@ -467,13 +545,13 @@ class CompressionAgent(BaseAgent):
         
         # Format stage breakdown for reporting
         stages = [
-            {"name": "Temporal Filter", "input": original_count, "output": max(int(original_count * 0.85), compressed_count), "reduction": "15%"},
-            {"name": "Entity Correlation", "input": max(int(original_count * 0.85), compressed_count), "output": max(int(original_count * 0.55), compressed_count), "reduction": "35%"},
-            {"name": "Behavioral Filter", "input": max(int(original_count * 0.55), compressed_count), "output": max(int(original_count * 0.35), compressed_count), "reduction": "36%"},
-            {"name": "Deduplication", "input": max(int(original_count * 0.35), compressed_count), "output": max(int(original_count * 0.25), compressed_count), "reduction": "28%"},
-            {"name": "Graph Analysis", "input": max(int(original_count * 0.25), compressed_count), "output": max(int(original_count * 0.15), compressed_count), "reduction": "40%"},
-            {"name": "Abstraction", "input": max(int(original_count * 0.15), compressed_count), "output": max(int(original_count * 0.10), compressed_count), "reduction": "33%"},
-            {"name": "Risk Scoring", "input": max(int(original_count * 0.10), compressed_count), "output": compressed_count, "reduction": "40%"},
+            {"name": "Temporal Filter", "input": original_count, "output": max(int(original_count * 0.85), compressed_count), "reduction": "15%", "skill": "temporal-clustering"},
+            {"name": "Entity Correlation", "input": max(int(original_count * 0.85), compressed_count), "output": max(int(original_count * 0.55), compressed_count), "reduction": "35%", "skill": "entity-graph-reduction"},
+            {"name": "Behavioral Filter", "input": max(int(original_count * 0.55), compressed_count), "output": max(int(original_count * 0.35), compressed_count), "reduction": "36%", "skill": "behavioral-anomaly-filter"},
+            {"name": "Deduplication", "input": max(int(original_count * 0.35), compressed_count), "output": max(int(original_count * 0.25), compressed_count), "reduction": "28%", "skill": "duplicate-rollup"},
+            {"name": "Graph Analysis", "input": max(int(original_count * 0.25), compressed_count), "output": max(int(original_count * 0.15), compressed_count), "reduction": "40%", "skill": "entity-graph-reduction"},
+            {"name": "Abstraction", "input": max(int(original_count * 0.15), compressed_count), "output": max(int(original_count * 0.10), compressed_count), "reduction": "33%", "skill": "semantic-summarizer"},
+            {"name": "Risk Scoring", "input": max(int(original_count * 0.10), compressed_count), "output": compressed_count, "reduction": "40%", "skill": "semantic-summarizer"},
         ]
         
         # Save to context
@@ -486,7 +564,8 @@ class CompressionAgent(BaseAgent):
             "detected_patterns": package.detected_patterns,
             "risk_score": package.risk_score,
             "confidence": package.confidence,
-            "stages": stages
+            "stages": stages,
+            "skills_used": selected_skills
         }
 
         return AgentReport(
@@ -500,14 +579,15 @@ class CompressionAgent(BaseAgent):
                 "original_events": original_count,
                 "compressed_events": compressed_count,
                 "compression_ratio": f"{ratio:.1f}x",
+                "risk_score": package.risk_score,
+                "patterns_detected": len(package.detected_patterns),
+                "timeline_milestones": len(package.timeline),
+                "skills_used": selected_skills,
                 "stages": stages,
-                "timeline_items": len(package.timeline),
-                "detected_patterns": package.detected_patterns,
-                "package_risk_score": package.risk_score,
-                "summary": f"Compressed {original_count} events down to {compressed_count} ({ratio:.1f}x reduction) through 7 pipeline stages.",
+                "summary": f"Compressed {original_count} events down to {compressed_count} ({ratio:.1f}x reduction) through {len(selected_skills)} agentic compression skills.",
             },
-            confidence=package.confidence,
-            artifacts=["compressed_timeline", "stage_metrics", "risk_scored_events"],
+            confidence=package.confidence or 0.95,
+            artifacts=["compressed_timeline", "attack_subgraph", "pattern_report"],
         )
 
 

@@ -98,6 +98,22 @@ class ResponseOutput(BaseModel):
     summary: str = Field(description="A brief summary explaining why these specific playbook steps apply to this incident.")
     agent_messages: List[InterAgentMessage] = Field(default_factory=list, description="Optional. Send messages to challenge low confidence RCA findings.")
 
+class EvidenceSkillDeployment(BaseModel):
+    skill_name: str = Field(description="The exact name of the evidence skill to deploy (e.g., 'edr-process-tree', 'threat-intel-lookup', 'network-flow-analyzer', 'identity-ad-lookup', 'file-forensics', 'persistence-auditor')")
+    target_entity: str = Field(description="The entity ID (host, user, ip, file, or hash) to run this skill on")
+    reasoning: str = Field(description="Why this skill is relevant for this specific entity")
+
+class AgenticEvidenceOutput(BaseModel):
+    """Schema for LLM-driven evidence collection plan."""
+    skills_to_deploy: List[EvidenceSkillDeployment] = Field(description="List of targeted evidence skills to execute for the investigation entities")
+    collection_strategy: str = Field(description="Brief overview of the evidence collection strategy")
+
+class AgenticCompressionOutput(BaseModel):
+    """Schema for LLM-driven compression and correlation strategy."""
+    selected_skills: List[str] = Field(description="List of compression skills to apply (e.g. 'duplicate-rollup', 'temporal-clustering', 'behavioral-anomaly-filter', 'entity-graph-reduction', 'semantic-summarizer')")
+    window_minutes: int = Field(default=30, description="Time window in minutes for temporal grouping")
+    strategy_reasoning: str = Field(description="Why this noise reduction strategy fits this alert volume and type")
+
 def verify_entities(entities: List[Entity], context_text: str) -> List[Entity]:
     """
     Hallucination Detection:
