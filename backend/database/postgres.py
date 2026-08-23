@@ -4,6 +4,7 @@ from sqlalchemy import create_engine, Column, String, Integer, DateTime, Float, 
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
+from typing import Optional
 
 # SQLAlchemy setup
 Base = declarative_base()
@@ -116,14 +117,23 @@ class RCAResultRecord(Base):
 
 
 def get_database_url(
-    host: str = "127.0.0.1",
-    port: int = 5432,
-    database: str = "soc_platform",
-    user: str = "soc_user",
-    password: str = "soc_password"
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    database: Optional[str] = None,
+    user: Optional[str] = None,
+    password: Optional[str] = None
 ) -> str:
-    """Build database connection string."""
-    return f"postgresql://{user}:{password}@{host}:{port}/{database}"
+    """Build database connection string with environment fallbacks."""
+    import os
+    env_url = os.getenv("DATABASE_URL")
+    if env_url:
+        return env_url
+    h = host or os.getenv("POSTGRES_HOST", "127.0.0.1")
+    p = port or int(os.getenv("POSTGRES_PORT", "5433"))
+    db = database or os.getenv("POSTGRES_DB", "soc_platform")
+    u = user or os.getenv("POSTGRES_USER", "soc_user")
+    pwd = password or os.getenv("POSTGRES_PASSWORD", "soc_password")
+    return f"postgresql://{u}:{pwd}@{h}:{p}/{db}"
 
 
 def create_db_engine(database_url: str):
