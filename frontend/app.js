@@ -1257,12 +1257,192 @@ function resetOrchUI() {
     document.getElementById('orchDag').innerHTML = '';
     const pendingBtn = document.getElementById('orchPendingBtn');
     if (pendingBtn) pendingBtn.style.display = 'none';
-    setOrchStatus('planning');
+// === Agent Orchestrator Dynamic DAG Architecture ===
+const AGENT_REGISTRY = {
+    'triage_agent': { label: 'Triage & Scope', icon: '🔍', color: '#38bdf8', category: 'Intake' },
+    'triage': { label: 'Triage & Scope', icon: '🔍', color: '#38bdf8', category: 'Intake' },
+    'triage_activity': { label: 'Triage & Scope', icon: '🔍', color: '#38bdf8', category: 'Intake' },
+
+    'evidence_agent': { label: 'Evidence Collection', icon: '📊', color: '#a78bfa', category: 'Forensics' },
+    'gather_evidence': { label: 'Evidence Collection', icon: '📊', color: '#a78bfa', category: 'Forensics' },
+    'evidence_activity': { label: 'Evidence Collection', icon: '📊', color: '#a78bfa', category: 'Forensics' },
+
+    'discovery_agent': { label: 'Network Discovery', icon: '🌐', color: '#34d399', category: 'Recon' },
+    'discover_network': { label: 'Network Discovery', icon: '🌐', color: '#34d399', category: 'Recon' },
+    'discovery_activity': { label: 'Network Discovery', icon: '🌐', color: '#34d399', category: 'Recon' },
+
+    'compression_agent': { label: '7-Stage Compression', icon: '🗜️', color: '#f59e0b', category: 'Analytics' },
+    'compress_events': { label: '7-Stage Compression', icon: '🗜️', color: '#f59e0b', category: 'Analytics' },
+    'compression_activity': { label: '7-Stage Compression', icon: '🗜️', color: '#f59e0b', category: 'Analytics' },
+
+    'rca_agent': { label: 'Root Cause Analysis', icon: '🔬', color: '#ec4899', category: 'Diagnosis' },
+    'perform_rca': { label: 'Root Cause Analysis', icon: '🔬', color: '#ec4899', category: 'Diagnosis' },
+    'rca_activity': { label: 'Root Cause Analysis', icon: '🔬', color: '#ec4899', category: 'Diagnosis' },
+
+    'response_agent': { label: 'Response Planning', icon: '⚡', color: '#f97316', category: 'Mitigation' },
+    'response_activity': { label: 'Response Planning', icon: '⚡', color: '#f97316', category: 'Mitigation' },
+    'finalize_response': { label: 'Response Planning', icon: '⚡', color: '#f97316', category: 'Mitigation' },
+
+    'pending_approval': { label: 'Human Authorization', icon: '🛡️', color: '#ef4444', category: 'Governance' },
+    'approve_response': { label: 'Human Authorization', icon: '🛡️', color: '#ef4444', category: 'Governance' },
+
+    'execute_response_activity': { label: 'Active Containment', icon: '🚀', color: '#10b981', category: 'Execution' },
+    'execute_response': { label: 'Active Containment', icon: '🚀', color: '#10b981', category: 'Execution' },
+
+    'persist_investigation_results_activity': { label: 'Graph & Audit Store', icon: '💾', color: '#6366f1', category: 'Knowledge' },
+    'persist_results': { label: 'Graph & Audit Store', icon: '💾', color: '#6366f1', category: 'Knowledge' }
+};
+
+function normalizeAgentKey(name) {
+    if (!name) return 'triage_agent';
+    return String(name).toLowerCase().replace(/['"]/g, '').trim();
+}
+
+function getAgentMeta(name) {
+    const key = normalizeAgentKey(name);
+    return AGENT_REGISTRY[key] || { label: String(name).replace(/_/g, ' '), icon: '⚙️', color: '#94a3b8', category: 'Activity' };
+}
+
+let activeDagPhases = [];
+
+function renderDynamicDAG(phases) {
+    const dagContainer = document.getElementById('orchDag');
+    if (!dagContainer) return;
+    dagContainer.innerHTML = '';
+    activeDagPhases = [];
+
+    (phases || []).forEach(phase => {
+        appendOrUpdateDAGPhase(
+            phase.phase_num || (activeDagPhases.length + 1),
+            phase.agents || (phase.tasks ? phase.tasks.map(t => t.agent) : []),
+            phase.parallel,
+            phase.status || 'pending'
+        );
+    });
+}
+
+function appendOrUpdateDAGPhase(phaseNum, agents, isParallel = false, initialStatus = 'pending') {
+    const dagContainer = document.getElementById('orchDag');
+    if (!dagContainer) return;
+    let phaseDiv = document.getElementById(`dagPhase${phaseNum}`);
+
+    const agentList = Array.isArray(agents) && agents.length > 0 ? agents : ['triage_agent'];
+
+    if (!phaseDiv) {
+        if (dagContainer.children.length > 0) {
+            const connector = document.createElement('div');
+            connector.className = 'dag-connector';
+            connector.innerHTML = `<div class="connector-line"></div><div class="connector-arrow">↓</div>`;
+            dagContainer.appendChild(connector);
+        }
+
+        phaseDiv = document.createElement('div');
+        phaseDiv.className = 'dag-phase';
+        phaseDiv.id = `dagPhase${phaseNum}`;
+
+        const meta = getAgentMeta(agentList[0]);
+        const parallelBadge = isParallel ? ' <span class="parallel-badge">PARALLEL</span>' : '';
+        
+        phaseDiv.innerHTML = `
+            <div class="phase-header">
+                <span class="phase-tag">PHASE ${phaseNum}</span>
+                <span class="phase-title">${meta.category || 'EXECUTION'}${parallelBadge}</span>
+            </div>
+            <div class="phase-agents" id="phaseAgents${phaseNum}"></div>
+        `;
+        dagContainer.appendChild(phaseDiv);
+        activeDagPhases.push(phaseNum);
+    }
+
+    const agentsDiv = phaseDiv.querySelector(`#phaseAgents${phaseNum}`);
+    agentList.forEach((agentName) => {
+        const agentKey = normalizeAgentKey(agentName);
+        const meta = getAgentMeta(agentKey);
+        const nodeId = `node-p${phaseNum}-${agentKey}`;
+        
+        let nodeDiv = document.getElementById(nodeId);
+        if (!nodeDiv) {
+            nodeDiv = document.createElement('div');
+            nodeDiv.className = `agent-node ${initialStatus}`;
+            nodeDiv.id = nodeId;
+            nodeDiv.dataset.agent = agentKey;
+            nodeDiv.dataset.phase = phaseNum;
+
+            nodeDiv.innerHTML = `
+                <div class="node-glow" style="--node-color: ${meta.color}"></div>
+                <div class="node-main">
+                    <div class="agent-icon-wrapper" style="background: ${meta.color}20; color: ${meta.color}; border: 1px solid ${meta.color}40">
+                        <span class="agent-icon">${meta.icon}</span>
+                    </div>
+                    <div class="agent-info">
+                        <div class="agent-label">${meta.label}</div>
+                        <div class="agent-subtext" id="subtext-${nodeId}">Awaiting dispatch</div>
+                    </div>
+                    <div class="agent-status-badge">
+                        <span class="status-indicator"></span>
+                    </div>
+                </div>
+                <div class="node-meta-bar" id="meta-${nodeId}" style="display: none;"></div>
+            `;
+            agentsDiv.appendChild(nodeDiv);
+        }
+    });
+}
+
+function setAgentNodeState(agentName, state, reportData = null) {
+    const key = normalizeAgentKey(agentName);
+    const matchingNodes = Array.from(document.querySelectorAll(`.agent-node[data-agent="${key}"]`));
+    
+    let targetNode = null;
+    if (state === 'running') {
+        targetNode = matchingNodes.find(n => n.classList.contains('pending')) || matchingNodes[matchingNodes.length - 1];
+    } else if (state === 'completed' || state === 'failed') {
+        targetNode = matchingNodes.find(n => n.classList.contains('running')) || matchingNodes[matchingNodes.length - 1];
+    } else {
+        targetNode = matchingNodes[matchingNodes.length - 1];
+    }
+
+    if (!targetNode && activeDagPhases.length > 0) {
+        const nextPhase = activeDagPhases.length + 1;
+        appendOrUpdateDAGPhase(nextPhase, [agentName], false, state);
+        targetNode = document.getElementById(`node-p${nextPhase}-${key}`);
+    }
+
+    if (targetNode) {
+        targetNode.className = `agent-node ${state}`;
+        const subtextEl = targetNode.querySelector('.agent-subtext');
+        const metaEl = targetNode.querySelector('.node-meta-bar');
+
+        if (state === 'running') {
+            if (subtextEl) subtextEl.textContent = 'Executing activity...';
+        } else if (state === 'completed') {
+            const dur = reportData && reportData.duration_ms ? `${reportData.duration_ms}ms` : 'Completed';
+            if (subtextEl) subtextEl.textContent = `✓ ${dur}`;
+            
+            if (metaEl && reportData && reportData.findings) {
+                metaEl.style.display = 'flex';
+                let metaHtml = '';
+                if (reportData.findings.original_events) {
+                    metaHtml += `<span class="meta-pill">${reportData.findings.original_events} → ${reportData.findings.compressed_events} events</span>`;
+                }
+                if (reportData.findings.iocs_found) {
+                    metaHtml += `<span class="meta-pill">${reportData.findings.iocs_found} IOCs</span>`;
+                }
+                if (reportData.findings.root_cause) {
+                    metaHtml += `<span class="meta-pill high-risk">RCA Identified</span>`;
+                }
+                if (metaHtml) metaEl.innerHTML = metaHtml;
+            }
+        } else if (state === 'failed') {
+            if (subtextEl) subtextEl.textContent = '✗ Execution failed';
+        }
+    }
 }
 
 function handleOrchEvent(type, data) {
     orchEventCount++;
-    document.getElementById('orchLogCount').textContent = `${orchEventCount} events`;
+    const countEl = document.getElementById('orchLogCount');
+    if (countEl) countEl.textContent = `${orchEventCount} events`;
 
     switch (type) {
         case 'run_start':
@@ -1272,18 +1452,28 @@ function handleOrchEvent(type, data) {
 
         case 'plan_created':
             setOrchStatus('running');
-            document.getElementById('orchReasoning').textContent = data.reasoning;
+            const reasonEl = document.getElementById('orchReasoning');
+            if (reasonEl) reasonEl.textContent = data.reasoning;
             renderDynamicDAG(data.phases || []);
-            addOrchLog(type, 'orchestrator', `Plan created: ${data.total_tasks} tasks across ${data.total_phases} phases`);
+            addOrchLog(type, 'orchestrator', `Plan initialized: ${data.total_tasks || 1} tasks across ${data.total_phases || 1} phases`);
             break;
 
         case 'phase_start':
             const parallelNote = data.parallel ? ' [PARALLEL]' : '';
+            appendOrUpdateDAGPhase(data.phase_num, data.agents || [], data.parallel, 'running');
             addOrchLog(type, 'orchestrator', `Starting Phase ${data.phase_num}${parallelNote}`);
             break;
 
         case 'pending_approval':
             setOrchStatus('pending_approval');
+            const nextP = activeDagPhases.length + 1;
+            appendOrUpdateDAGPhase(nextP, ['pending_approval'], false, 'running');
+            const approvalNode = document.getElementById(`node-p${nextP}-pending_approval`);
+            if (approvalNode) {
+                const subtext = approvalNode.querySelector('.agent-subtext');
+                if (subtext) subtext.innerHTML = `<span style="color: #ef4444; font-weight: bold;">Authorization Required</span>`;
+            }
+
             const btn = document.getElementById('orchPendingBtn');
             if (btn) {
                 btn.style.display = 'inline-block';
@@ -1291,8 +1481,8 @@ function handleOrchEvent(type, data) {
                     document.querySelector('.nav-item[data-page="approvals"]').click();
                     setTimeout(() => {
                         const el = document.getElementById(`approval-${data.workflow_id}`);
-                        if(el) {
-                            el.scrollIntoView({behavior: 'smooth', block: 'center'});
+                        if (el) {
+                            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
                             el.style.transition = 'box-shadow 0.3s ease-in-out';
                             el.style.boxShadow = '0 0 15px var(--accent-red)';
                             setTimeout(() => el.style.boxShadow = 'none', 3000);
@@ -1318,7 +1508,7 @@ function handleOrchEvent(type, data) {
         case 'agent_complete':
             const report = data.report;
             const state = report.status === 'completed' ? 'completed' : 'failed';
-            setAgentNodeState(data.agent_name, state);
+            setAgentNodeState(data.agent_name, state, report);
             const summary = getAgentLogSummary(report);
             addOrchLog(type, data.agent_name, `Completed (${report.duration_ms}ms) — ${summary}`);
             addAgentReport(report);
@@ -1340,87 +1530,19 @@ function handleOrchEvent(type, data) {
     }
 }
 
-function renderDynamicDAG(phases) {
-    const dagContainer = document.getElementById('orchDag');
-    dagContainer.innerHTML = ''; // clear
-
-    const agentIcons = {
-        'triage_agent': '&#128269;',
-        'evidence_agent': '&#128200;',
-        'discovery_agent': '&#127760;',
-        'compression_agent': '&#128476;',
-        'rca_agent': '&#128300;',
-        'response_agent': '&#9889;',
-    };
-
-    const agentLabels = {
-        'triage_agent': 'Triage',
-        'evidence_agent': 'Evidence',
-        'discovery_agent': 'Discovery',
-        'compression_agent': 'Compression',
-        'rca_agent': 'RCA',
-        'response_agent': 'Response',
-    };
-
-    phases.forEach((phase, index) => {
-        // Add connector arrow (if not first phase)
-        if (index > 0) {
-            const connector = document.createElement('div');
-            connector.className = 'dag-connector';
-            connector.innerHTML = '&#8595;';
-            dagContainer.appendChild(connector);
-        }
-
-        const phaseDiv = document.createElement('div');
-        phaseDiv.className = 'dag-phase';
-        phaseDiv.id = `dagPhase${phase.phase_num}`;
-
-        const parallelBadge = phase.parallel ? ' <span class="parallel-badge">PARALLEL</span>' : '';
-        const labelDiv = document.createElement('div');
-        labelDiv.className = 'phase-label';
-        labelDiv.innerHTML = `Phase ${phase.phase_num}${parallelBadge}`;
-        phaseDiv.appendChild(labelDiv);
-
-        const agentsDiv = document.createElement('div');
-        agentsDiv.className = 'phase-agents';
-
-        const phaseAgents = phase.agents || (phase.tasks ? phase.tasks.map(t => t.agent) : []);
-
-        phaseAgents.forEach(agentName => {
-            const nodeDiv = document.createElement('div');
-            nodeDiv.className = 'agent-node pending';
-            nodeDiv.id = `node-${agentName}`;
-            nodeDiv.dataset.agent = agentName;
-
-            nodeDiv.innerHTML = `
-                <div class="agent-icon">${agentIcons[agentName] || '&#9881;'}</div>
-                <div class="agent-label">${agentLabels[agentName] || agentName}</div>
-                <div class="agent-status-dot"></div>
-            `;
-            agentsDiv.appendChild(nodeDiv);
-        });
-
-        phaseDiv.appendChild(agentsDiv);
-        dagContainer.appendChild(phaseDiv);
-    });
-}
-
 function setOrchStatus(status) {
     const badge = document.getElementById('orchStatus');
+    if (!badge) return;
     badge.className = `orch-status-badge ${status}`;
-    const labels = { planning: 'Planning...', running: 'Executing', completed: 'Completed', failed: 'Failed' };
+    const labels = { planning: 'Planning...', running: 'Executing', completed: 'Completed', failed: 'Failed', pending_approval: 'Pending Approval' };
     badge.textContent = labels[status] || status;
-}
-
-function setAgentNodeState(agentName, state) {
-    const node = document.getElementById(`node-${agentName}`);
-    if (node) node.className = `agent-node ${state}`;
 }
 
 function updateOrchTimer() {
     if (!orchStartTime) return;
     const elapsed = ((Date.now() - orchStartTime) / 1000).toFixed(1);
-    document.getElementById('orchTimer').textContent = `${elapsed}s`;
+    const timerEl = document.getElementById('orchTimer');
+    if (timerEl) timerEl.textContent = `${elapsed}s`;
 }
 
 function addOrchLog(eventType, agent, message) {

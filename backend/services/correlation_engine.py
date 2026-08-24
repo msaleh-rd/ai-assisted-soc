@@ -103,10 +103,22 @@ class TemporalFilter:
         window_start = incident_time - window
         window_end = incident_time + window
         
+        # Parse all event timestamps to identify dominant log epoch
+        valid_timestamps = []
+        for e in events:
+            dt = self._try_parse_timestamp(e)
+            if dt:
+                valid_timestamps.append(dt)
+        
+        dominant_epoch = None
+        if valid_timestamps:
+            sorted_ts = sorted(valid_timestamps)
+            dominant_epoch = sorted_ts[len(sorted_ts) // 2]
+
         # Events within temporal window
         relevant_events = []
         for event in events:
-            event_time = self._parse_timestamp(event)
+            event_time = self._parse_timestamp(event, fallback=dominant_epoch or incident_time)
             # Normalize timezone awareness for comparison
             if event_time.tzinfo is not None and window_start.tzinfo is None:
                 event_time = event_time.replace(tzinfo=None)
@@ -116,25 +128,47 @@ class TemporalFilter:
             if window_start <= event_time <= window_end:
                 relevant_events.append(event)
         
-        # If window filter removed everything (e.g., alert timestamp outside log recording period),
-        # keep all events so downstream stages can still correlate the evidence
+        # If incident_time was in a different epoch (e.g. current year alert on historical dataset),
+        # re-anchor window around the dominant log epoch
+        if len(relevant_events) < min(len(events) * 0.1, 5) and dominant_epoch and events:
+            epoch_start = dominant_epoch - window
+            epoch_end = dominant_epoch + window
+            relevant_events = []
+            for event in events:
+                event_time = self._parse_timestamp(event, fallback=dominant_epoch)
+                if event_time.tzinfo is not None and epoch_start.tzinfo is None:
+                    event_time = event_time.replace(tzinfo=None)
+                elif event_time.tzinfo is None and epoch_start.tzinfo is not None:
+                    from datetime import timezone as tz
+                    event_time = event_time.replace(tzinfo=tz.utc)
+                if epoch_start <= event_time <= epoch_end:
+                    relevant_events.append(event)
+
         if not relevant_events and events:
             relevant_events = events
 
-        # Calculate event density
-        hourly_events = defaultdict(int)
-        for event in relevant_events:
-            event_time = self._parse_timestamp(event)
-            hour_key = event_time.replace(minute=0, second=0, microsecond=0)
-            hourly_events[hour_key] += 1
-        
-        # Filter hours with sufficient density
-        active_hours = {h for h, count in hourly_events.items() 
-                       if count / len(relevant_events) >= self.min_event_density}
-        
-        final_events = [e for e in relevant_events 
-                       if self._parse_timestamp(e).replace(minute=0, second=0, microsecond=0) 
-                       in active_hours]
+        # If event volume is already manageable (<= 500 events), keep all temporal events
+        if len(relevant_events) <= 500:
+            final_events = relevant_events
+        else:
+            # Calculate event density for high-volume logs
+            hourly_events = defaultdict(int)
+            for event in relevant_events:
+                event_time = self._parse_timestamp(event, fallback=dominant_epoch)
+                hour_key = event_time.replace(minute=0, second=0, microsecond=0)
+                hourly_events[hour_key] += 1
+            
+            # Filter hours with sufficient density
+            active_hours = {h for h, count in hourly_events.items() 
+                           if count / len(relevant_events) >= self.min_event_density}
+            
+            final_events = []
+            for e in relevant_events:
+                e_hour = self._parse_timestamp(e, fallback=dominant_epoch).replace(minute=0, second=0, microsecond=0)
+                risk = e.get('risk_score', 0)
+                # Keep event if it's in an active hour OR if it has non-trivial risk
+                if e_hour in active_hours or risk > 0.3:
+                    final_events.append(e)
         
         if not final_events and relevant_events:
             final_events = relevant_events
@@ -144,15 +178,28 @@ class TemporalFilter:
         return final_events, reduction
     
     @staticmethod
-    def _parse_timestamp(event: Dict) -> datetime:
-        """Parse timestamp from event."""
+    def _try_parse_timestamp(event: Dict) -> Optional[datetime]:
+        """Try parsing timestamp from event without fallback."""
         ts = event.get('timestamp', '')
-        if isinstance(ts, str):
+        if isinstance(ts, str) and ts:
             try:
                 return datetime.fromisoformat(ts.replace('Z', '+00:00'))
             except:
-                return datetime.now()
-        return datetime.fromtimestamp(ts / 1000) if ts else datetime.now()
+                pass
+        elif isinstance(ts, (int, float)) and ts > 0:
+            try:
+                return datetime.fromtimestamp(ts / 1000 if ts > 1e11 else ts)
+            except:
+                pass
+        return None
+
+    @staticmethod
+    def _parse_timestamp(event: Dict, fallback: Optional[datetime] = None) -> datetime:
+        """Parse timestamp from event with optional fallback."""
+        dt = TemporalFilter._try_parse_timestamp(event)
+        if dt is not None:
+            return dt
+        return fallback or datetime.now()
 
 
 class EntityCorrelator:
@@ -192,7 +239,11 @@ class EntityCorrelator:
         # Support both detailed fields and simplified entity/action format
         entity = event.get('entity', '')
         if entity:
-            action = event.get('action', 'unknown')
+            action = event.get('action')
+            if not action or action == 'unknown':
+                action = event.get('event_type')
+            if not action or action == 'unknown' or action == 'log_event':
+                action = event.get('process', 'unknown')
             return (entity, action)
         
         user = event.get('user', 'unknown')
@@ -402,69 +453,63 @@ class GraphAnalyzer:
     
     def _find_lateral_movement(self, events: List[CorrelatedEvent]) -> List[Dict]:
         """Find lateral movement patterns."""
-        
         patterns = []
-        
+        keywords = ['login', 'execute', 'execve', 'ssh', 'ps1', 'sh ', 'download', 'powershell', 'wmic', 'psexec', 'http']
         for event in events:
-            if event.action in ['login', 'execute', 'access']:
+            act_lower = str(event.action).lower()
+            if any(k in act_lower for k in keywords):
                 patterns.append({
                     'type': AttackType.LATERAL_MOVEMENT.value,
                     'entity': event.entity_id,
                     'timestamp': event.timestamp.isoformat(),
-                    'confidence': 0.7
+                    'confidence': 0.75
                 })
-        
         return patterns
     
     def _find_privilege_escalation(self, events: List[CorrelatedEvent]) -> List[Dict]:
         """Find privilege escalation patterns."""
-        
         patterns = []
-        
+        keywords = ['sudo', 'admin', 'system', 'root', 'setuid', 'uac', 'privilege', 'chown', 'chmod']
         for event in events:
-            if event.action in ['sudo', 'admin', 'system']:
+            act_lower = str(event.action).lower()
+            if any(k in act_lower for k in keywords):
                 patterns.append({
                     'type': AttackType.PRIVILEGE_ESCALATION.value,
                     'entity': event.entity_id,
                     'timestamp': event.timestamp.isoformat(),
                     'confidence': 0.8
                 })
-        
         return patterns
     
     def _find_credential_compromise(self, events: List[CorrelatedEvent]) -> List[Dict]:
         """Find credential compromise patterns."""
-        
         patterns = []
+        failed_logins = [e for e in events if 'fail' in str(e.action).lower() and 'login' in str(e.action).lower()]
+        successful_logins = [e for e in events if 'success' in str(e.action).lower() and 'login' in str(e.action).lower()]
         
-        # Multiple failed logins followed by successful
-        failed_logins = [e for e in events if e.action == 'failed_login']
-        successful_logins = [e for e in events if e.action == 'successful_login']
-        
-        if len(failed_logins) > 5 and successful_logins:
+        if (len(failed_logins) > 5 and successful_logins) or any('mimikatz' in str(e.action).lower() for e in events):
             patterns.append({
                 'type': AttackType.CREDENTIAL_COMPROMISE.value,
                 'failed_attempts': len(failed_logins),
                 'successful_logins': len(successful_logins),
                 'confidence': 0.85
             })
-        
         return patterns
     
     def _find_data_access_patterns(self, events: List[CorrelatedEvent]) -> List[Dict]:
         """Find data exfiltration patterns."""
-        
         patterns = []
-        
+        keywords = ['file_access', 'data_read', 'export', 'encrypt', 'donotcry', 'upload', 'exfiltrat', 'tar ', 'zip ']
         for event in events:
-            if event.action in ['file_access', 'data_read', 'export']:
+            act_lower = str(event.action).lower()
+            if any(k in act_lower for k in keywords):
+                attack_type = AttackType.RANSOMWARE.value if any(r in act_lower for r in ['encrypt', 'donotcry', 'ransom']) else AttackType.DATA_EXFILTRATION.value
                 patterns.append({
-                    'type': AttackType.DATA_EXFILTRATION.value,
+                    'type': attack_type,
                     'entity': event.entity_id,
                     'timestamp': event.timestamp.isoformat(),
-                    'confidence': 0.75
+                    'confidence': 0.85
                 })
-        
         return patterns
     
     @staticmethod
@@ -560,6 +605,16 @@ class RiskScorer:
             # Confidence based on evidence quality
             event.confidence = max(event.confidence, min(1.0, len(event.raw_events) / 10))
         
+        # Contextual boost: If an event is <= 0.3 risk but occurs near a high risk event for same entity, boost it
+        for event in events:
+            if event.risk_score <= 0.3:
+                for other in events:
+                    if other.risk_score >= 0.7 and other.entity_id == event.entity_id:
+                        time_diff = abs((event.timestamp - other.timestamp).total_seconds())
+                        if time_diff <= 300:  # 5 minutes
+                            event.risk_score = 0.4  # boost above threshold
+                            break
+
         # Filter low-risk events
         high_risk_events = [e for e in events if e.risk_score > 0.3]
         if not high_risk_events and events:
@@ -696,7 +751,14 @@ class CorrelationEngine:
         """Build timeline from events."""
         
         timeline = []
+        cis_events = []
+        
         for event in sorted(events, key=lambda e: e.timestamp):
+            action_lower = str(event.action).lower()
+            if "cis" in action_lower or "compliance" in action_lower or "baseline" in action_lower or "benchmark" in action_lower:
+                cis_events.append(event)
+                continue
+                
             timeline.append({
                 'timestamp': event.timestamp.isoformat(),
                 'event_type': event.event_type,
@@ -704,7 +766,21 @@ class CorrelationEngine:
                 'action': event.action,
                 'risk_score': event.risk_score
             })
-        
+            
+        if cis_events:
+            # Roll up all CIS/Compliance events into a single milestone
+            timestamp = cis_events[0].timestamp.isoformat()
+            max_risk = max([e.risk_score for e in cis_events])
+            timeline.append({
+                'timestamp': timestamp,
+                'event_type': 'compliance_audit',
+                'entity': cis_events[0].entity_id,
+                'action': f"CIS Compliance Baseline Audit ({len(cis_events)} rules)",
+                'risk_score': max_risk
+            })
+            # Re-sort timeline to place the rolled up event correctly
+            timeline.sort(key=lambda x: x['timestamp'])
+            
         return timeline
     
     @staticmethod

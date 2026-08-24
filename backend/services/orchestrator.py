@@ -316,9 +316,27 @@ class EvidenceAgent(BaseAgent):
                         "type": "logged_into"
                     })
                     
+        # Deduplicate relationships to prevent edge explosions across ReAct iterations
+        unique_rels = []
+        seen_rels = set()
+        
+        # Add existing relationships first to maintain history
+        for r in context.relationships:
+            key = (r.get("source"), r.get("target"), r.get("type"))
+            if key not in seen_rels:
+                seen_rels.add(key)
+                unique_rels.append(r)
+                
+        # Add new relationships uniquely
+        for r in relationships:
+            key = (r.get("source"), r.get("target"), r.get("type"))
+            if key not in seen_rels:
+                seen_rels.add(key)
+                unique_rels.append(r)
+                    
         # Update context
         context.entity_graph = entity_graph
-        context.relationships = relationships
+        context.relationships = unique_rels
 
         high_risk_iocs = [
             f"{k.replace('file:', '').replace('ip:', '').replace('host:', '').replace('user:', '')} (Risk: {v.get('risk_score', 0)})"
@@ -479,16 +497,41 @@ class CompressionAgent(BaseAgent):
                             searched_entities.add(eid)
                             log_events = ingestor.search_entity(eid, ent.get("type", "unknown"), max_results=100)
                             for levt in log_events:
+                                ent_val = levt.get("entity")
+                                if not ent_val or ent_val == "unknown":
+                                    ent_val = eid
+                                
+                                act_val = levt.get("action") or levt.get("event_type") or "unknown"
+                                
+                                # Derive meaningful risk score based on content and IOC match
+                                risk_val = float(levt.get("risk_score", 0.1))
+                                alert_file = (context.alert_data.get("file_name") or "").lower()
+                                act_lower = str(act_val).lower()
+                                
+                                suspicious_indicators = [
+                                    alert_file, "encrypt", "install.sh", "donotcry", "raindrop",
+                                    "powershell", "curl", "wget", "chmod +x", "base64", "mimikatz",
+                                    "whoami", "certutil", "vssadmin", "shadowcopy", "rundll32"
+                                ]
+                                suspicious_indicators = [ind for ind in suspicious_indicators if ind]
+                                
+                                if any(ind in act_lower for ind in suspicious_indicators):
+                                    risk_val = max(risk_val, 0.85)
+                                elif levt.get("source") == "audit" and levt.get("event_type") in ("EXECVE", "SYSCALL"):
+                                    risk_val = max(risk_val, 0.45)
+                                elif "siem_alert" in str(levt.get("event_type", "")).lower():
+                                    risk_val = max(risk_val, 0.75)
+
                                 raw_events.append({
                                     "event_id": f"log-{uuid.uuid4().hex[:8]}",
                                     "timestamp": levt.get("timestamp", datetime.utcnow().isoformat()),
                                     "event_type": levt.get("event_type", "log_event"),
-                                    "entity": levt.get("entity", eid),
-                                    "user": levt.get("metadata", {}).get("uid", "unknown"),
-                                    "host": levt.get("metadata", {}).get("hostname", levt.get("entity", "unknown")),
+                                    "entity": ent_val,
+                                    "user": levt.get("metadata", {}).get("uid") or (eid if ent.get("type") == "user" else context.alert_data.get("user_name", "unknown")),
+                                    "host": levt.get("metadata", {}).get("hostname") or (eid if ent.get("type") == "host" else context.alert_data.get("computer_name", "unknown")),
                                     "process": levt.get("metadata", {}).get("comm", levt.get("metadata", {}).get("exe", "unknown")),
-                                    "action": levt.get("action", "unknown"),
-                                    "risk_score": levt.get("risk_score", 0.1),
+                                    "action": act_val,
+                                    "risk_score": risk_val,
                                     "source": levt.get("source", "log_file"),
                                 })
                 logger.info(f"Ingested {len(raw_events)} real log events for {len(searched_entities)} entities from dataset")
@@ -558,12 +601,43 @@ class CompressionAgent(BaseAgent):
             for sm in package.stage_metrics
         ]
         
+        # Agentic Compression: LLM Semantic Summarization
+        final_timeline = package.timeline
+        if package.timeline:
+            try:
+                from backend.services.llm_client import get_llm
+                from pydantic import BaseModel, Field
+                import json
+                
+                class TimelineEvent(BaseModel):
+                    timestamp: str = Field(..., description="Timestamp of the event")
+                    event_type: str = Field(..., description="Semantic category (e.g., Initial Access, Execution, Privilege Escalation)")
+                    entity: str = Field(..., description="Entity involved")
+                    action: str = Field(..., description="Detailed description of the action")
+                    risk_score: float = Field(..., description="Risk score (0.0-1.0)")
+                
+                class SemanticTimeline(BaseModel):
+                    timeline: list[TimelineEvent] = Field(..., description="Chronological semantic timeline")
+                
+                llm = get_llm(role="summarizer")
+                structured_llm = llm.with_structured_output(SemanticTimeline)
+                prompt = (
+                    "You are a SOC Analyst. Convert the following raw events into a semantic timeline of an attack or investigation. "
+                    "Identify key phases (e.g. Initial Access, Discovery, Lateral Movement). Ensure actions are clear and descriptive.\n\n"
+                    f"Events: {json.dumps(package.timeline)}"
+                )
+                res = structured_llm.invoke(prompt)
+                if res and res.timeline:
+                    final_timeline = [e.model_dump() if hasattr(e, "model_dump") else e.dict() for e in res.timeline]
+            except Exception as e:
+                logger.error(f"Failed to generate semantic timeline: {e}")
+
         # Save to context
         context.compressed_events = {
             "original_events": original_count,
             "compressed_events": compressed_count,
             "compression_ratio": f"{ratio:.1f}x",
-            "timeline": package.timeline,
+            "timeline": final_timeline,
             "attack_graph": package.attack_graph,
             "detected_patterns": package.detected_patterns,
             "risk_score": package.risk_score,

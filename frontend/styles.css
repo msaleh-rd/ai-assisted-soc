@@ -562,55 +562,170 @@ textarea.code-input {
     border-left: 3px solid var(--purple);
 }
 
-/* Agent DAG */
+/* Agent DAG & Execution Map */
 .orch-dag {
     display: flex; flex-direction: column; align-items: center;
-    gap: 0.25rem; margin: 1.5rem 0; padding: 1.5rem;
-    background: var(--bg-secondary); border-radius: 10px;
-    border: 1px solid var(--border);
+    gap: 0.75rem; margin: 1.5rem 0; padding: 1.75rem;
+    background: radial-gradient(circle at top, #131722 0%, #0b0e14 100%);
+    border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 8px 32px rgba(0, 0, 0, 0.3);
 }
-.dag-phase { text-align: center; width: 100%; }
-.phase-label {
-    font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em;
-    color: var(--text-muted); margin-bottom: 0.5rem;
+
+.dag-phase {
+    width: 100%; max-width: 650px;
+    display: flex; flex-direction: column; align-items: center;
+    animation: fadeInSlide 0.3s ease-out;
 }
+
+.phase-header {
+    display: flex; align-items: center; gap: 0.5rem;
+    margin-bottom: 0.6rem;
+}
+
+.phase-tag {
+    font-size: 0.65rem; font-weight: 800; letter-spacing: 0.08em;
+    padding: 0.15rem 0.45rem; border-radius: 4px;
+    background: rgba(255, 255, 255, 0.06); color: var(--text-muted);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.phase-title {
+    font-size: 0.75rem; font-weight: 700; letter-spacing: 0.05em;
+    text-transform: uppercase; color: var(--text-secondary);
+}
+
 .parallel-badge {
     background: rgba(167, 139, 250, 0.2); color: #a78bfa;
-    padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.65rem; font-weight: 700;
+    padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 700;
 }
-.phase-agents { display: flex; justify-content: center; gap: 1rem; flex-wrap: wrap; }
-.dag-connector { color: var(--text-muted); font-size: 1.2rem; }
+
+.phase-agents {
+    display: flex; justify-content: center; gap: 1rem; width: 100%;
+}
+
+.dag-connector {
+    display: flex; flex-direction: column; align-items: center;
+    color: var(--text-muted); font-size: 1.1rem; line-height: 1;
+    margin: 0.1rem 0; opacity: 0.6;
+}
 
 .agent-node {
-    position: relative; display: flex; flex-direction: column; align-items: center;
-    gap: 0.3rem; padding: 0.75rem 1.25rem; border-radius: 10px;
-    background: var(--bg-panel); border: 2px solid var(--border);
-    min-width: 90px; transition: all 0.3s ease;
+    position: relative; display: flex; flex-direction: column;
+    padding: 0.85rem 1.1rem; border-radius: 10px;
+    background: rgba(26, 31, 44, 0.75);
+    backdrop-filter: blur(8px);
+    border: 1.5px solid rgba(255, 255, 255, 0.08);
+    width: 100%; max-width: 480px;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    overflow: hidden;
 }
-.agent-node.pending { border-color: var(--border); opacity: 0.5; }
+
+.agent-node:hover {
+    transform: translateY(-2px);
+    border-color: rgba(255, 255, 255, 0.2);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+
+.agent-node.pending {
+    opacity: 0.45; border-color: rgba(255, 255, 255, 0.05);
+}
+
 .agent-node.running {
-    border-color: var(--accent); box-shadow: 0 0 12px rgba(79, 143, 247, 0.3);
-    animation: agentPulse 1.5s ease-in-out infinite;
+    opacity: 1;
+    border-color: var(--accent);
+    box-shadow: 0 0 20px rgba(79, 143, 247, 0.35);
+    animation: agentPulse 2s infinite;
 }
-.agent-node.completed { border-color: #34d399; opacity: 1; }
-.agent-node.failed { border-color: #f87171; }
-.agent-icon { font-size: 1.5rem; }
-.agent-label { font-size: 0.75rem; font-weight: 600; color: var(--text-primary); }
-.agent-status-dot {
-    position: absolute; top: 6px; right: 6px;
-    width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted);
+
+.agent-node.completed {
+    opacity: 1;
+    border-color: rgba(52, 211, 153, 0.6);
+    background: rgba(16, 37, 30, 0.75);
 }
-.agent-node.running .agent-status-dot { background: var(--accent); animation: dotPulse 1s infinite; }
-.agent-node.completed .agent-status-dot { background: #34d399; }
-.agent-node.failed .agent-status-dot { background: #f87171; }
+
+.agent-node.failed {
+    opacity: 1;
+    border-color: rgba(248, 113, 113, 0.8);
+    background: rgba(45, 18, 18, 0.75);
+}
+
+.node-main {
+    display: flex; align-items: center; gap: 0.85rem; width: 100%;
+}
+
+.agent-icon-wrapper {
+    width: 38px; height: 38px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.25rem; flex-shrink: 0;
+}
+
+.agent-info {
+    flex: 1; display: flex; flex-direction: column; gap: 0.15rem;
+}
+
+.agent-label {
+    font-size: 0.88rem; font-weight: 700; color: var(--text-primary);
+}
+
+.agent-subtext {
+    font-size: 0.75rem; color: var(--text-muted); font-family: 'Cascadia Code', monospace;
+}
+
+.agent-status-badge {
+    display: flex; align-items: center; justify-content: center;
+    width: 14px; height: 14px;
+}
+
+.status-indicator {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--text-muted); transition: all 0.3s;
+}
+
+.agent-node.running .status-indicator {
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent);
+    animation: dotPulse 1s infinite;
+}
+
+.agent-node.completed .status-indicator {
+    background: #34d399;
+    box-shadow: 0 0 6px rgba(52, 211, 153, 0.6);
+}
+
+.agent-node.failed .status-indicator {
+    background: #f87171;
+}
+
+.node-meta-bar {
+    margin-top: 0.5rem; padding-top: 0.5rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    display: flex; gap: 0.4rem; flex-wrap: wrap;
+}
+
+.meta-pill {
+    font-size: 0.68rem; font-weight: 600;
+    padding: 0.15rem 0.4rem; border-radius: 4px;
+    background: rgba(255, 255, 255, 0.08); color: var(--text-secondary);
+}
+
+.meta-pill.high-risk {
+    background: rgba(239, 68, 68, 0.2); color: #f87171;
+    border: 1px solid rgba(239, 68, 68, 0.4);
+}
 
 @keyframes agentPulse {
-    0%, 100% { box-shadow: 0 0 8px rgba(79, 143, 247, 0.2); }
-    50% { box-shadow: 0 0 20px rgba(79, 143, 247, 0.5); }
+    0%, 100% { box-shadow: 0 0 12px rgba(79, 143, 247, 0.25); }
+    50% { box-shadow: 0 0 24px rgba(79, 143, 247, 0.6); }
 }
+
 @keyframes dotPulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.3; }
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.4); opacity: 0.4; }
+}
+
+@keyframes fadeInSlide {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
 }
 
 /* Live Log */

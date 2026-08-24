@@ -109,10 +109,12 @@ class SupervisorAgent:
 
             # Auto-register newly detected pivot entity if provided
             if decision.pivot_entity_detected:
-                # Infer type
-                ptype = "ip" if any(c.isdigit() for c in decision.pivot_entity_detected) and "." in decision.pivot_entity_detected else "host"
-                context.add_entity(decision.pivot_entity_detected, entity_type=ptype, is_pivot=True)
-                logger.info(f"Supervisor registered new lateral pivot entity: {decision.pivot_entity_detected} ({ptype})")
+                sanitized_entity = self._sanitize_entity_id(decision.pivot_entity_detected)
+                if sanitized_entity:
+                    # Infer type
+                    ptype = "ip" if any(c.isdigit() for c in sanitized_entity) and "." in sanitized_entity else "host"
+                    context.add_entity(sanitized_entity, entity_type=ptype, is_pivot=True)
+                    logger.info(f"Supervisor registered new lateral pivot entity: {sanitized_entity} ({ptype})")
 
             # Validate decision
             decision = self._validate_and_sanitize_decision(decision, context)
@@ -122,6 +124,27 @@ class SupervisorAgent:
         except Exception as e:
             logger.warning(f"Supervisor LLM decision error: {e}, applying heuristic fallback decision")
             return self._heuristic_fallback_decision(context)
+
+    def _sanitize_entity_id(self, entity_str: str) -> str:
+        """Extracts purely the IP, domain, or filename from conversational text."""
+        import re
+        if not entity_str:
+            return ""
+        # try to find IP
+        ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', entity_str)
+        if ip_match:
+            return ip_match.group(0)
+        # fallback string cleanup, remove quotes, etc.
+        cleaned = re.sub(r'["\']', '', entity_str)
+        # If it's a short string, just return it
+        if len(cleaned.split()) <= 2:
+            return cleaned.strip()
+        # otherwise try to find something that looks like an entity (filename/hostname)
+        for word in cleaned.split():
+            word = word.strip(',.')
+            if '.' in word or '\\' in word or '/' in word:
+                return word
+        return cleaned.split()[0] if cleaned else ""
 
     def _validate_and_sanitize_decision(self, decision: SupervisorDecision, context: InvestigationContext) -> SupervisorDecision:
         """Ensure the chosen action is executable and targets valid entities."""
