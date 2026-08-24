@@ -72,7 +72,7 @@ class TriageOutput(BaseModel):
 class InterAgentMessage(BaseModel):
     target_agent: Literal["evidence_agent", "rca_agent", "response_agent", "triage_agent", "*"] = Field(description="The specific agent you are messaging.")
     msg_type: Literal["REQUEST_EVIDENCE", "LOW_CONFIDENCE", "CHALLENGE", "FYI"] = Field(description="The intent of the message.")
-    payload: Dict[str, Any] = Field(description="A dictionary of data to pass. For REQUEST_EVIDENCE, this should include an 'entities' list of specific entity IDs you need more data on.")
+    payload: Dict[str, str] = Field(default_factory=dict, description="Key-value dictionary of parameters or details to pass.")
     reason: str = Field(description="Why you are sending this message.")
 
 class RCAOutput(BaseModel):

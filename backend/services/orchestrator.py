@@ -7,6 +7,7 @@ collects reports, and synthesizes a final answer.
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -14,6 +15,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, AsyncGenerator, Dict, List, Optional
 from backend.services.investigation_context import InvestigationContext
+
+logger = logging.getLogger("orchestrator")
 
 
 # ---------------------------------------------------------------------------
@@ -451,61 +454,51 @@ class CompressionAgent(BaseAgent):
             finally:
                 db.close()
                 
-        # If no DB events found, generate realistic event telemetry stream from alert and entity relationships
+        # If no DB events found, ingest real logs from dataset directory
+        if not raw_events:
+            try:
+                from backend.services.evidence.log_ingestor import get_log_ingestor
+                ingestor = get_log_ingestor()
+                
+                # Collect real log events for all identified entities
+                searched_entities = set()
+                for ent in context.entities:
+                    if isinstance(ent, dict):
+                        eid = ent.get("id", "")
+                        if eid and eid not in searched_entities:
+                            searched_entities.add(eid)
+                            log_events = ingestor.search_entity(eid, ent.get("type", "unknown"), max_results=100)
+                            for levt in log_events:
+                                raw_events.append({
+                                    "event_id": f"log-{uuid.uuid4().hex[:8]}",
+                                    "timestamp": levt.get("timestamp", datetime.utcnow().isoformat()),
+                                    "event_type": levt.get("event_type", "log_event"),
+                                    "entity": levt.get("entity", eid),
+                                    "user": levt.get("metadata", {}).get("uid", "unknown"),
+                                    "host": levt.get("metadata", {}).get("hostname", levt.get("entity", "unknown")),
+                                    "process": levt.get("metadata", {}).get("comm", levt.get("metadata", {}).get("exe", "unknown")),
+                                    "action": levt.get("action", "unknown"),
+                                    "risk_score": levt.get("risk_score", 0.1),
+                                    "source": levt.get("source", "log_file"),
+                                })
+                logger.info(f"Ingested {len(raw_events)} real log events for {len(searched_entities)} entities from dataset")
+            except Exception as e:
+                logger.warning(f"Log ingestor unavailable, falling back to alert-derived events: {e}")
+        
+        # Last resort: create a minimal event from the alert itself if still no events
         if not raw_events:
             alert = context.alert_data or {}
-            alert_ts = alert.get("timestamp") or datetime.utcnow().isoformat()
-            alert_user = alert.get("user_name") or "unknown"
-            alert_host = alert.get("computer_name") or "unknown"
-            alert_file = alert.get("file_name") or alert.get("file_path") or "unknown"
-            alert_ip = alert.get("ip_address") or "unknown"
-            
-            # Primary incident event
             raw_events.append({
                 "event_id": f"evt-{uuid.uuid4().hex[:8]}",
-                "timestamp": alert_ts,
+                "timestamp": alert.get("timestamp") or datetime.utcnow().isoformat(),
                 "event_type": context.classification or "security_alert",
-                "entity": alert_host,
-                "user": alert_user,
-                "host": alert_host,
-                "process": alert_file,
-                "ip": alert_ip,
+                "entity": alert.get("computer_name", "unknown"),
+                "user": alert.get("user_name", "unknown"),
+                "host": alert.get("computer_name", "unknown"),
+                "process": alert.get("file_name", "unknown"),
                 "action": alert.get("description", "Alert trigger event"),
                 "risk_score": 0.9 if context.severity.lower() in ("critical", "high") else 0.5,
             })
-            
-            # Add telemetry for each entity & relationship in context
-            for eid, edata in (context.entity_graph or {}).items():
-                etype = edata.get("type", "unknown")
-                ename = edata.get("id", eid)
-                risk = edata.get("risk_score", 0.3)
-                
-                # Create correlated telemetry stream
-                raw_events.append({
-                    "event_id": f"evt-{uuid.uuid4().hex[:8]}",
-                    "timestamp": alert_ts,
-                    "event_type": f"{etype}_activity",
-                    "entity": ename,
-                    "user": ename if etype == "user" else alert_user,
-                    "host": ename if etype == "host" else alert_host,
-                    "process": ename if etype in ("process", "file") else alert_file,
-                    "ip": ename if etype == "ip" else alert_ip,
-                    "action": f"{etype} telemetry active",
-                    "risk_score": risk,
-                })
-                
-            for rel in (context.relationships or []):
-                raw_events.append({
-                    "event_id": f"evt-{uuid.uuid4().hex[:8]}",
-                    "timestamp": alert_ts,
-                    "event_type": "relationship_interaction",
-                    "entity": rel.get("source", "unknown"),
-                    "user": alert_user,
-                    "host": alert_host,
-                    "process": alert_file,
-                    "action": rel.get("type", "connected_to"),
-                    "risk_score": 0.6,
-                })
 
         # Run through full 7-stage CorrelationEngine
         engine = CorrelationEngine()
@@ -543,15 +536,16 @@ class CompressionAgent(BaseAgent):
         compressed_count = package.compressed_event_count
         ratio = package.compression_ratio
         
-        # Format stage breakdown for reporting
+        # Format stage breakdown from REAL engine metrics
         stages = [
-            {"name": "Temporal Filter", "input": original_count, "output": max(int(original_count * 0.85), compressed_count), "reduction": "15%", "skill": "temporal-clustering"},
-            {"name": "Entity Correlation", "input": max(int(original_count * 0.85), compressed_count), "output": max(int(original_count * 0.55), compressed_count), "reduction": "35%", "skill": "entity-graph-reduction"},
-            {"name": "Behavioral Filter", "input": max(int(original_count * 0.55), compressed_count), "output": max(int(original_count * 0.35), compressed_count), "reduction": "36%", "skill": "behavioral-anomaly-filter"},
-            {"name": "Deduplication", "input": max(int(original_count * 0.35), compressed_count), "output": max(int(original_count * 0.25), compressed_count), "reduction": "28%", "skill": "duplicate-rollup"},
-            {"name": "Graph Analysis", "input": max(int(original_count * 0.25), compressed_count), "output": max(int(original_count * 0.15), compressed_count), "reduction": "40%", "skill": "entity-graph-reduction"},
-            {"name": "Abstraction", "input": max(int(original_count * 0.15), compressed_count), "output": max(int(original_count * 0.10), compressed_count), "reduction": "33%", "skill": "semantic-summarizer"},
-            {"name": "Risk Scoring", "input": max(int(original_count * 0.10), compressed_count), "output": compressed_count, "reduction": "40%", "skill": "semantic-summarizer"},
+            {
+                "name": sm.name,
+                "input": sm.input_count,
+                "output": sm.output_count,
+                "reduction": f"{sm.reduction_pct:.1f}%",
+                "skill": sm.skill,
+            }
+            for sm in package.stage_metrics
         ]
         
         # Save to context

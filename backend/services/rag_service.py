@@ -43,6 +43,11 @@ _CLASSIFICATION_TO_PLAYBOOK = {
     "phishing": "Phishing Response",
     "phishing_response": "Phishing Response",
     "credential_compromise": "Lateral Movement",
+    "credential_spraying": "Lateral Movement",
+    "brute_force": "Lateral Movement",
+    "privilege_escalation": "Lateral Movement",
+    "unauthorized_access": "Lateral Movement",
+    "reconnaissance": "Lateral Movement",
 }
 
 

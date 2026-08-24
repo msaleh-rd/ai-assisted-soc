@@ -50,6 +50,16 @@ class CorrelatedEvent:
 
 
 @dataclass
+class StageMetrics:
+    """Actual metrics from a single compression stage."""
+    name: str
+    input_count: int
+    output_count: int
+    reduction_pct: float  # 0-100
+    skill: str
+
+
+@dataclass
 class CompressedPackage:
     """Compressed evidence package ready for RCA."""
     investigation_id: str
@@ -63,6 +73,7 @@ class CompressedPackage:
     risk_score: float
     confidence: float
     created_at: datetime
+    stage_metrics: List[StageMetrics] = field(default_factory=list)
 
 
 class TemporalFilter:
@@ -105,6 +116,11 @@ class TemporalFilter:
             if window_start <= event_time <= window_end:
                 relevant_events.append(event)
         
+        # If window filter removed everything (e.g., alert timestamp outside log recording period),
+        # keep all events so downstream stages can still correlate the evidence
+        if not relevant_events and events:
+            relevant_events = events
+
         # Calculate event density
         hourly_events = defaultdict(int)
         for event in relevant_events:
@@ -119,6 +135,9 @@ class TemporalFilter:
         final_events = [e for e in relevant_events 
                        if self._parse_timestamp(e).replace(minute=0, second=0, microsecond=0) 
                        in active_hours]
+        
+        if not final_events and relevant_events:
+            final_events = relevant_events
         
         reduction = 1.0 - (len(final_events) / len(events)) if events else 1.0
         
@@ -543,6 +562,9 @@ class RiskScorer:
         
         # Filter low-risk events
         high_risk_events = [e for e in events if e.risk_score > 0.3]
+        if not high_risk_events and events:
+            # If no event exceeded 0.3 threshold, keep top risk events
+            high_risk_events = sorted(events, key=lambda e: e.risk_score, reverse=True)[:max(5, len(events))]
         
         return high_risk_events
     
@@ -586,33 +608,70 @@ class CorrelationEngine:
         
         original_count = len(raw_events)
         events = raw_events
-        reductions = {}
+        stage_metrics: List[StageMetrics] = []
         
         # Stage 1: Temporal Filter
+        count_before = len(events)
         events, reduction = self.temporal_filter.filter_events(events, incident_time)
-        reductions['temporal'] = reduction
+        count_after = len(events)
+        stage_metrics.append(StageMetrics(
+            name="Temporal Filter", input_count=count_before, output_count=count_after,
+            reduction_pct=round(reduction * 100, 1), skill="temporal-clustering"
+        ))
         
         # Stage 2: Entity Correlation
+        count_before = len(events)
         correlated_events, reduction = self.entity_correlator.correlate_events(events)
-        reductions['entity_correlation'] = reduction
+        count_after = len(correlated_events)
+        stage_metrics.append(StageMetrics(
+            name="Entity Correlation", input_count=count_before, output_count=count_after,
+            reduction_pct=round(reduction * 100, 1), skill="entity-graph-reduction"
+        ))
         
         # Stage 3: Behavioral Filter
+        count_before = len(correlated_events)
         anomalous_events, reduction = self.behavioral_filter.filter_anomalies(correlated_events)
-        reductions['behavioral'] = reduction
+        count_after = len(anomalous_events)
+        stage_metrics.append(StageMetrics(
+            name="Behavioral Filter", input_count=count_before, output_count=count_after,
+            reduction_pct=round(reduction * 100, 1), skill="behavioral-anomaly-filter"
+        ))
         
         # Stage 4: Deduplication
+        count_before = len(anomalous_events)
         deduped_events, reduction = self.deduplicator.deduplicate(anomalous_events)
-        reductions['deduplication'] = reduction
+        count_after = len(deduped_events)
+        stage_metrics.append(StageMetrics(
+            name="Deduplication", input_count=count_before, output_count=count_after,
+            reduction_pct=round(reduction * 100, 1), skill="duplicate-rollup"
+        ))
         
         # Stage 5: Graph Analysis
+        count_before = len(deduped_events)
         patterns, reduction = self.graph_analyzer.analyze_relationships(deduped_events)
-        reductions['graph_analysis'] = reduction
+        # Graph analysis finds patterns but doesn't reduce the event list itself
+        stage_metrics.append(StageMetrics(
+            name="Graph Analysis", input_count=count_before, output_count=count_before,
+            reduction_pct=0.0, skill="entity-graph-reduction"
+        ))
         
         # Stage 6: Abstraction
         abstractions = self.abstraction_engine.abstract_events(deduped_events)
+        stage_metrics.append(StageMetrics(
+            name="Abstraction", input_count=len(deduped_events), output_count=len(abstractions),
+            reduction_pct=round((1.0 - len(abstractions) / max(len(deduped_events), 1)) * 100, 1),
+            skill="semantic-summarizer"
+        ))
         
         # Stage 7: Risk Scoring
+        count_before = len(deduped_events)
         high_risk_events = self.risk_scorer.score_risks(deduped_events, patterns)
+        count_after = len(high_risk_events)
+        stage_metrics.append(StageMetrics(
+            name="Risk Scoring", input_count=count_before, output_count=count_after,
+            reduction_pct=round((1.0 - count_after / max(count_before, 1)) * 100, 1),
+            skill="semantic-summarizer"
+        ))
         
         # Build compressed package
         package = CompressedPackage(
@@ -626,7 +685,8 @@ class CorrelationEngine:
             detected_patterns=patterns,
             risk_score=self._calculate_package_risk(high_risk_events, patterns),
             confidence=self._calculate_confidence(high_risk_events),
-            created_at=datetime.now()
+            created_at=datetime.now(),
+            stage_metrics=stage_metrics,
         )
         
         return package

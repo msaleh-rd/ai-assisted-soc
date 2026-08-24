@@ -1,12 +1,18 @@
-"""Evidence Skill Handlers for executing evidence skills against real telemetry."""
+"""Evidence Skill Handlers — executes evidence skills against real log data.
+
+Each handler follows a 3-tier lookup:
+  1. PostgreSQL EntityRecord (if ingested)
+  2. Real log files via LogIngestor (Wazuh, Suricata, audit.log, auth.log)
+  3. Minimal generic fallback (no hardcoded scenario data)
+"""
 
 import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+from collections import Counter
 
 from backend.database.connection import SessionLocal
 from backend.database.postgres import EntityRecord, EventRecord
-from backend.models.entities import EntityNode, EntityType, EntityRelationship, RelationshipType
 
 logger = logging.getLogger("evidence-skills")
 
@@ -42,6 +48,10 @@ class EvidenceSkillExecutor:
             logger.error(f"Error executing skill {skill_name} on {entity_id}: {e}")
             return EvidenceSkillExecutor._handle_generic_lookup(entity_id, entity_type)
 
+    # ------------------------------------------------------------------
+    # Tier 1: PostgreSQL lookup
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _fetch_db_record(entity_id: str) -> Optional[Dict[str, Any]]:
         if not SessionLocal:
@@ -65,150 +75,488 @@ class EvidenceSkillExecutor:
         finally:
             db.close()
 
+    # ------------------------------------------------------------------
+    # Tier 2: Log-backed helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_ingestor():
+        """Lazy import to avoid circular imports."""
+        from backend.services.evidence.log_ingestor import get_log_ingestor
+        return get_log_ingestor()
+
+    @staticmethod
+    def _compute_risk_from_events(events: List[Dict[str, Any]]) -> float:
+        """Compute aggregate risk from a list of log events."""
+        if not events:
+            return 0.1
+        risks = [e.get("risk_score", 0.1) for e in events]
+        return round(max(risks), 2)
+
+    # ------------------------------------------------------------------
+    # Skill: EDR Process Tree
+    # ------------------------------------------------------------------
+
     @staticmethod
     async def _handle_edr_process_tree(entity_id: str, entity_type: str, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        # Tier 1: DB
         db_data = EvidenceSkillExecutor._fetch_db_record(entity_id)
         if db_data:
             return db_data
 
-        # Telemetry resolution for process/host entities
-        is_suspicious = any(s in entity_id.lower() for s in ["install.sh", "donotcry", "powershell", "cmd.exe", "nc", "bash"])
+        # Tier 2: Real audit logs
+        ingestor = EvidenceSkillExecutor._get_ingestor()
+        hostname = entity_id if entity_type in ("host", "endpoint") else ctx.get("alert", {}).get("computer_name", "")
+        process_events = ingestor.get_process_tree_from_audit(entity_id, hostname)
+
+        if process_events:
+            # Extract real process data from audit events
+            execve_cmds = []
+            parent_pids = set()
+            child_pids = set()
+            executables = set()
+
+            for evt in process_events:
+                meta = evt.get("metadata", {})
+                if meta.get("execve_args"):
+                    execve_cmds.append(" ".join(meta["execve_args"]))
+                if meta.get("ppid"):
+                    parent_pids.add(meta["ppid"])
+                if meta.get("pid"):
+                    child_pids.add(meta["pid"])
+                if meta.get("exe"):
+                    executables.add(meta["exe"])
+                if meta.get("comm"):
+                    executables.add(meta["comm"])
+
+            risk = EvidenceSkillExecutor._compute_risk_from_events(process_events)
+            is_suspicious = risk >= 0.6
+
+            return {
+                "enrichment_data": {
+                    "process_name": entity_id,
+                    "executables_observed": sorted(executables)[:20],
+                    "execve_commands": execve_cmds[:20],
+                    "parent_pids": sorted(parent_pids)[:10],
+                    "child_pids": sorted(child_pids)[:10],
+                    "total_audit_events": len(process_events),
+                    "command_line": execve_cmds[0] if execve_cmds else f"./{entity_id}",
+                    "execution_time": process_events[0].get("timestamp", datetime.utcnow().isoformat() + "Z"),
+                    "integrity_level": "High/Root" if any("uid=0" in str(e.get("raw", "")) for e in process_events) else "Medium",
+                },
+                "threat_intel": {
+                    "is_signed": not is_suspicious,
+                    "reputation": "Suspicious" if is_suspicious else "Unknown",
+                    "evidence_source": "linux_audit_log",
+                    "audit_events_matched": len(process_events),
+                },
+                "risk_score": risk,
+                "is_known_malicious": is_suspicious,
+            }
+
+        # Tier 3: Minimal generic fallback
         return {
             "enrichment_data": {
                 "process_name": entity_id,
-                "parent_process": "bash" if entity_id.endswith(".sh") else "services.exe",
-                "parent_pid": 1042,
-                "child_processes": ["donotcry"] if "install.sh" in entity_id else [],
-                "command_line": f"./{entity_id}" if "sh" in entity_id else f"{entity_id} -run",
-                "execution_time": datetime.utcnow().isoformat() + "Z",
-                "integrity_level": "High/Root" if "root" in str(ctx) or is_suspicious else "Medium",
+                "note": "No audit log data found for this entity",
             },
-            "threat_intel": {
-                "is_signed": not is_suspicious,
-                "signer": "Unknown / Unsigned" if is_suspicious else "Microsoft Corporation",
-                "reputation": "Suspicious execution" if is_suspicious else "Benign",
-            },
-            "risk_score": 0.85 if is_suspicious else 0.2,
-            "is_known_malicious": is_suspicious,
+            "threat_intel": {"reputation": "unknown", "evidence_source": "none"},
+            "risk_score": 0.1,
+            "is_known_malicious": False,
         }
+
+    # ------------------------------------------------------------------
+    # Skill: Network Flow Analyzer
+    # ------------------------------------------------------------------
 
     @staticmethod
     async def _handle_network_flow(entity_id: str, entity_type: str, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        # Tier 1: DB
         db_data = EvidenceSkillExecutor._fetch_db_record(entity_id)
         if db_data:
             return db_data
 
-        is_c2_ip = entity_id in ("192.42.1.174", "203.0.113.5", "203.0.113.10") or entity_id.startswith("192.42.")
+        # Tier 2: Real Suricata NetFlow data
+        ingestor = EvidenceSkillExecutor._get_ingestor()
+        flow_events = ingestor.get_network_flows_for_ip(entity_id)
+
+        if flow_events:
+            # Analyze real network flows
+            protocols = set()
+            dest_ports = set()
+            src_ports = set()
+            dest_ips = set()
+            dns_queries = []
+            total_bytes_out = 0
+            alert_count = 0
+            event_types = Counter()
+
+            for evt in flow_events:
+                meta = evt.get("metadata", {})
+                if meta.get("proto"):
+                    protocols.add(meta["proto"])
+                if meta.get("app_proto"):
+                    protocols.add(meta["app_proto"].upper())
+                if meta.get("dest_port"):
+                    dest_ports.add(meta["dest_port"])
+                if meta.get("src_port"):
+                    src_ports.add(meta["src_port"])
+                if meta.get("dest_ip"):
+                    dest_ips.add(meta["dest_ip"])
+                if meta.get("dns") and meta["dns"].get("rrname"):
+                    dns_queries.append(meta["dns"]["rrname"])
+                if meta.get("flow") and meta["flow"].get("bytes_toserver"):
+                    total_bytes_out += meta["flow"]["bytes_toserver"]
+                if meta.get("netflow") and meta["netflow"].get("bytes"):
+                    total_bytes_out += meta["netflow"]["bytes"]
+                if meta.get("alert"):
+                    alert_count += 1
+                event_types[evt.get("event_type", "unknown")] += 1
+
+            risk = EvidenceSkillExecutor._compute_risk_from_events(flow_events)
+            has_alerts = alert_count > 0
+            high_volume = total_bytes_out > 1_000_000
+
+            return {
+                "enrichment_data": {
+                    "target_ip": entity_id,
+                    "open_sockets": sorted(dest_ports)[:20],
+                    "active_connections": len(flow_events),
+                    "bytes_transferred_out": total_bytes_out,
+                    "beaconing_detected": len(flow_events) > 50 or high_volume,
+                    "protocols": sorted(protocols),
+                    "dns_queries": list(set(dns_queries))[:20],
+                    "destination_ips": sorted(dest_ips)[:20],
+                    "suricata_alerts": alert_count,
+                    "event_type_distribution": dict(event_types),
+                    "first_seen": flow_events[-1].get("timestamp", "") if flow_events else "",
+                    "last_seen": flow_events[0].get("timestamp", "") if flow_events else "",
+                },
+                "threat_intel": {
+                    "has_ids_alerts": has_alerts,
+                    "high_volume_transfer": high_volume,
+                    "evidence_source": "suricata_eve_json",
+                    "total_events_analyzed": len(flow_events),
+                },
+                "risk_score": risk if has_alerts else min(risk, 0.5),
+                "is_known_malicious": has_alerts,
+            }
+
+        # Tier 3: Minimal fallback
         return {
             "enrichment_data": {
                 "target_ip": entity_id,
-                "open_sockets": [8888, 443] if is_c2_ip else [80, 443, 22],
-                "active_connections": 12 if is_c2_ip else 3,
-                "bytes_transferred_out": 4500000 if is_c2_ip else 12000,
-                "beaconing_detected": is_c2_ip,
-                "protocols": ["HTTP", "HTTPS", "TCP"],
+                "note": "No Suricata flow data found for this IP",
             },
-            "threat_intel": {
-                "abuse_confidence_score": 95 if is_c2_ip else 0,
-                "is_c2_node": is_c2_ip,
-                "asn_org": "Attacker Infrastructure ASN" if is_c2_ip else "Internal Network",
-            },
-            "risk_score": 0.95 if is_c2_ip else 0.1,
-            "is_known_malicious": is_c2_ip,
+            "threat_intel": {"reputation": "unknown", "evidence_source": "none"},
+            "risk_score": 0.1,
+            "is_known_malicious": False,
         }
+
+    # ------------------------------------------------------------------
+    # Skill: Identity / Active Directory Lookup
+    # ------------------------------------------------------------------
 
     @staticmethod
     async def _handle_identity_ad(entity_id: str, entity_type: str, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        # Tier 1: DB
         db_data = EvidenceSkillExecutor._fetch_db_record(entity_id)
         if db_data:
             return db_data
 
-        is_root_or_admin = entity_id.lower() in ("root", "administrator", "admin", "system")
+        # Tier 2: Real auth.log data
+        ingestor = EvidenceSkillExecutor._get_ingestor()
+        user_events = ingestor.get_user_activity(entity_id)
+
+        if user_events:
+            # Analyze real auth events
+            failed_logins = 0
+            successful_logins = 0
+            sudo_events = 0
+            password_changes = 0
+            hosts_accessed = set()
+            last_login = ""
+            programs = Counter()
+
+            for evt in user_events:
+                action = evt.get("action", "").lower()
+                meta = evt.get("metadata", {})
+                if meta.get("hostname"):
+                    hosts_accessed.add(meta["hostname"])
+                if meta.get("program"):
+                    programs[meta["program"]] += 1
+                if "failed" in action or "invalid" in action:
+                    failed_logins += 1
+                elif "accepted" in action or "session opened" in action:
+                    successful_logins += 1
+                    if not last_login:
+                        last_login = evt.get("timestamp", "")
+                if "sudo" in str(meta.get("program", "")).lower():
+                    sudo_events += 1
+                if "password changed" in action:
+                    password_changes += 1
+
+            is_privileged = entity_id.lower() in ("root", "administrator", "admin", "system") or sudo_events > 0
+            risk = EvidenceSkillExecutor._compute_risk_from_events(user_events)
+
+            return {
+                "enrichment_data": {
+                    "account_name": entity_id,
+                    "privileged": is_privileged,
+                    "mfa_enabled": not is_privileged,  # Heuristic from auth logs
+                    "account_status": "Active",
+                    "groups": ["Root Group", "sudo"] if is_privileged else ["Users"],
+                    "last_login": last_login or datetime.utcnow().isoformat() + "Z",
+                    "failed_logins_last_24h": failed_logins,
+                    "successful_logins": successful_logins,
+                    "sudo_events": sudo_events,
+                    "password_changes": password_changes,
+                    "hosts_accessed": sorted(hosts_accessed),
+                    "auth_programs": dict(programs),
+                },
+                "threat_intel": {
+                    "compromise_likelihood": "High" if failed_logins > 3 or password_changes > 0 else "Low",
+                    "credential_leak_detected": password_changes > 0,
+                    "evidence_source": "linux_auth_log",
+                    "total_events_analyzed": len(user_events),
+                },
+                "risk_score": risk,
+                "is_suspicious": is_privileged and (failed_logins > 3 or password_changes > 0),
+            }
+
+        # Tier 3: Minimal fallback
+        is_root = entity_id.lower() in ("root", "administrator", "admin", "system")
         return {
             "enrichment_data": {
                 "account_name": entity_id,
-                "privileged": is_root_or_admin,
-                "mfa_enabled": not is_root_or_admin,
-                "account_status": "Active",
-                "groups": ["Domain Admins", "Root Group"] if is_root_or_admin else ["Domain Users"],
-                "last_login": datetime.utcnow().isoformat() + "Z",
-                "failed_logins_last_24h": 4 if is_root_or_admin else 0,
+                "privileged": is_root,
+                "note": "No auth log data found for this user",
             },
-            "threat_intel": {
-                "compromise_likelihood": "High" if is_root_or_admin else "Low",
-                "credential_leak_detected": is_root_or_admin,
-            },
-            "risk_score": 0.8 if is_root_or_admin else 0.1,
-            "is_suspicious": is_root_or_admin,
+            "threat_intel": {"evidence_source": "none"},
+            "risk_score": 0.3 if is_root else 0.1,
+            "is_suspicious": False,
         }
+
+    # ------------------------------------------------------------------
+    # Skill: Threat Intelligence Lookup
+    # ------------------------------------------------------------------
 
     @staticmethod
     async def _handle_threat_intel(entity_id: str, entity_type: str, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        # Tier 1: DB
         db_data = EvidenceSkillExecutor._fetch_db_record(entity_id)
         if db_data:
             return db_data
 
-        is_malicious = any(s in entity_id.lower() for s in ["192.42.1.174", "donotcry", "install.sh", "payload.exe"])
-        return {
-            "enrichment_data": {
-                "ioc": entity_id,
-                "ioc_type": entity_type,
-                "first_seen": "2026-08-20T10:00:00Z",
-                "last_seen": datetime.utcnow().isoformat() + "Z",
-            },
-            "threat_intel": {
+        # Tier 2: Cross-reference across all log sources
+        ingestor = EvidenceSkillExecutor._get_ingestor()
+        all_events = ingestor.search_entity(entity_id, entity_type, max_results=100)
+
+        if all_events:
+            # Aggregate threat intelligence from real log matches
+            sources = Counter()
+            mitre_techniques = set()
+            mitre_tactics = set()
+            wazuh_rules = set()
+            suricata_sigs = set()
+            max_risk = 0.0
+            first_seen = ""
+            last_seen = ""
+
+            for evt in all_events:
+                sources[evt.get("source", "unknown")] += 1
+                risk = evt.get("risk_score", 0.0)
+                max_risk = max(max_risk, risk)
+                ts = evt.get("timestamp", "")
+                if ts:
+                    if not first_seen or ts < first_seen:
+                        first_seen = ts
+                    if not last_seen or ts > last_seen:
+                        last_seen = ts
+                meta = evt.get("metadata", {})
+                if meta.get("mitre_techniques"):
+                    mitre_techniques.update(meta["mitre_techniques"])
+                if meta.get("mitre_tactics"):
+                    mitre_tactics.update(meta["mitre_tactics"])
+                if meta.get("rule_id"):
+                    wazuh_rules.add(meta["rule_id"])
+                if meta.get("alert") and meta["alert"].get("signature"):
+                    suricata_sigs.add(meta["alert"]["signature"])
+
+            is_malicious = max_risk >= 0.7 or len(suricata_sigs) > 0
+
+            return {
+                "enrichment_data": {
+                    "ioc": entity_id,
+                    "ioc_type": entity_type,
+                    "first_seen": first_seen,
+                    "last_seen": last_seen,
+                    "total_log_hits": len(all_events),
+                    "source_distribution": dict(sources),
+                },
+                "threat_intel": {
+                    "is_known_malicious": is_malicious,
+                    "reputation_score": int(max_risk * 100),
+                    "mitre_techniques": sorted(mitre_techniques),
+                    "mitre_tactics": sorted(mitre_tactics),
+                    "wazuh_rule_ids": sorted(wazuh_rules),
+                    "suricata_signatures": sorted(suricata_sigs),
+                    "evidence_source": "cross_log_correlation",
+                    "data_sources_matched": sorted(sources.keys()),
+                },
+                "risk_score": round(max_risk, 2),
                 "is_known_malicious": is_malicious,
-                "reputation_score": 98 if is_malicious else 5,
-                "threat_actor": "DoNotCry Ransomware Gang" if is_malicious else "None",
-                "malware_family": "Ransom.DoNotCry" if "donotcry" in entity_id.lower() else ("C2 Ingress" if is_malicious else "Clean"),
-            },
-            "risk_score": 0.95 if is_malicious else 0.05,
-            "is_known_malicious": is_malicious,
+            }
+
+        # Tier 3: Minimal fallback
+        return {
+            "enrichment_data": {"ioc": entity_id, "ioc_type": entity_type, "note": "No log matches found"},
+            "threat_intel": {"is_known_malicious": False, "evidence_source": "none"},
+            "risk_score": 0.05,
+            "is_known_malicious": False,
         }
+
+    # ------------------------------------------------------------------
+    # Skill: File Forensics
+    # ------------------------------------------------------------------
 
     @staticmethod
     async def _handle_file_forensics(entity_id: str, entity_type: str, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        # Tier 1: DB
         db_data = EvidenceSkillExecutor._fetch_db_record(entity_id)
         if db_data:
             return db_data
 
-        is_ransomware = "donotcry" in entity_id.lower() or "install.sh" in entity_id.lower()
+        # Tier 2: Search audit logs for file access/execution events
+        ingestor = EvidenceSkillExecutor._get_ingestor()
+
+        # Extract just the filename from paths
+        import os as _os
+        filename = _os.path.basename(entity_id) if "/" in entity_id or "\\" in entity_id else entity_id
+
+        file_events = ingestor.search_entity(filename, "file", max_results=100)
+
+        if file_events:
+            # Analyze file activity from audit and SIEM logs
+            access_commands = []
+            file_paths = set()
+            users_accessed = set()
+
+            for evt in file_events:
+                meta = evt.get("metadata", {})
+                if meta.get("execve_args"):
+                    cmd = " ".join(meta["execve_args"])
+                    if filename.lower() in cmd.lower():
+                        access_commands.append(cmd)
+                if meta.get("exe") and filename.lower() in meta["exe"].lower():
+                    file_paths.add(meta["exe"])
+                if meta.get("uid"):
+                    users_accessed.add(meta["uid"])
+
+            risk = EvidenceSkillExecutor._compute_risk_from_events(file_events)
+
+            return {
+                "enrichment_data": {
+                    "file_name": filename,
+                    "file_path": entity_id,
+                    "access_commands": access_commands[:10],
+                    "file_paths_observed": sorted(file_paths)[:10],
+                    "users_who_accessed": sorted(users_accessed),
+                    "total_log_events": len(file_events),
+                    "first_seen": file_events[-1].get("timestamp", "") if file_events else "",
+                    "last_seen": file_events[0].get("timestamp", "") if file_events else "",
+                },
+                "threat_intel": {
+                    "is_known_malicious": risk >= 0.7,
+                    "evidence_source": "log_file_analysis",
+                    "log_hits": len(file_events),
+                },
+                "risk_score": risk,
+                "is_known_malicious": risk >= 0.7,
+            }
+
+        # Tier 3: Minimal fallback
         return {
-            "enrichment_data": {
-                "file_path": f"/media/data/Images/{entity_id}" if "donotcry" in entity_id else f"/tmp/{entity_id}",
-                "file_size": 248900 if is_ransomware else 1024,
-                "entropy": 7.92 if is_ransomware else 4.10,  # High entropy indicates encrypted payload
-                "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" if is_ransomware else "clean_hash_placeholder",
-                "ransom_indicator": "High entropy & encryption signatures detected" if is_ransomware else "None",
-            },
-            "threat_intel": {
-                "is_known_malicious": is_ransomware,
-                "malware_family": "Ransom.DoNotCry" if is_ransomware else "Clean",
-            },
-            "risk_score": 0.95 if is_ransomware else 0.1,
-            "is_known_malicious": is_ransomware,
+            "enrichment_data": {"file_name": filename, "file_path": entity_id, "note": "No log data found"},
+            "threat_intel": {"is_known_malicious": False, "evidence_source": "none"},
+            "risk_score": 0.1,
+            "is_known_malicious": False,
         }
+
+    # ------------------------------------------------------------------
+    # Skill: Persistence Auditor
+    # ------------------------------------------------------------------
 
     @staticmethod
     async def _handle_persistence_auditor(entity_id: str, entity_type: str, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        # Tier 1: DB
         db_data = EvidenceSkillExecutor._fetch_db_record(entity_id)
         if db_data:
             return db_data
 
+        # Tier 2: Real persistence artifacts from host logs
+        ingestor = EvidenceSkillExecutor._get_ingestor()
+        hostname = entity_id if entity_type in ("host", "endpoint") else ctx.get("alert", {}).get("computer_name", entity_id)
+        persistence = ingestor.get_persistence_artifacts(hostname)
+
+        has_data = any(len(v) > 0 for v in persistence.values())
+        if has_data:
+            cron_entries = persistence.get("cron_entries", [])
+            suspicious_scripts = persistence.get("suspicious_scripts", [])
+            systemd_services = persistence.get("systemd_services", [])
+            audit_rules = persistence.get("audit_rules", [])
+
+            # Extract unique suspicious script paths
+            script_paths = set()
+            for evt in suspicious_scripts:
+                meta = evt.get("metadata", {})
+                if meta.get("execve_args"):
+                    for arg in meta["execve_args"]:
+                        if "/" in arg and any(arg.endswith(ext) for ext in [".sh", ".py", ".pl", ".rb"]):
+                            script_paths.add(arg)
+
+            # Extract audit rule keys
+            rule_keys = set()
+            for evt in audit_rules:
+                meta = evt.get("metadata", {})
+                if meta.get("key") and meta["key"] != "(null)":
+                    rule_keys.add(meta["key"])
+
+            risk = 0.3
+            if len(suspicious_scripts) > 10:
+                risk = 0.8
+            elif len(suspicious_scripts) > 0:
+                risk = 0.6
+
+            return {
+                "enrichment_data": {
+                    "cron_entries_count": len(cron_entries),
+                    "cron_sample": cron_entries[:10],
+                    "suspicious_scripts": sorted(script_paths)[:20],
+                    "suspicious_script_events": len(suspicious_scripts),
+                    "systemd_services": systemd_services[:20],
+                    "audit_rule_keys": sorted(rule_keys),
+                },
+                "threat_intel": {
+                    "persistence_score": risk,
+                    "technique": "T1053.003 - Scheduled Task/Job: Cron" if cron_entries or suspicious_scripts else "None detected",
+                    "evidence_source": "host_log_analysis",
+                },
+                "risk_score": risk,
+                "is_suspicious": len(suspicious_scripts) > 0,
+            }
+
+        # Tier 3: Minimal fallback
         return {
-            "enrichment_data": {
-                "cron_jobs_checked": ["/etc/cron.d/healthcheck_cron.sh", "/etc/crontab"],
-                "suspicious_cron_found": True,
-                "systemd_services": ["healthcheckd.service"],
-                "registry_run_keys": [],
-            },
-            "threat_intel": {
-                "persistence_score": 0.85,
-                "technique": "T1053.003 - Scheduled Task/Job: Cron",
-            },
-            "risk_score": 0.85,
-            "is_suspicious": True,
+            "enrichment_data": {"hostname": hostname, "note": "No persistence artifacts found in logs"},
+            "threat_intel": {"persistence_score": 0.0, "evidence_source": "none"},
+            "risk_score": 0.1,
+            "is_suspicious": False,
         }
+
+    # ------------------------------------------------------------------
+    # Generic fallback
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _handle_generic_lookup(entity_id: str, entity_type: str) -> Dict[str, Any]:
@@ -216,9 +564,24 @@ class EvidenceSkillExecutor:
         if db_data:
             return db_data
 
+        # Try log search as last resort
+        try:
+            ingestor = EvidenceSkillExecutor._get_ingestor()
+            events = ingestor.search_entity(entity_id, entity_type, max_results=50)
+            if events:
+                risk = EvidenceSkillExecutor._compute_risk_from_events(events)
+                return {
+                    "enrichment_data": {"id": entity_id, "type": entity_type, "log_hits": len(events)},
+                    "threat_intel": {"evidence_source": "generic_log_search", "events_found": len(events)},
+                    "risk_score": risk,
+                    "is_known_malicious": risk >= 0.7,
+                }
+        except Exception:
+            pass
+
         return {
             "enrichment_data": {"id": entity_id, "type": entity_type},
             "threat_intel": {"reputation": "unknown"},
-            "risk_score": 0.3,
+            "risk_score": 0.1,
             "is_known_malicious": False,
         }
