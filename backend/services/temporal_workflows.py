@@ -494,6 +494,8 @@ class InvestigationWorkflow:
                     self._progress.phases[-1]["status"] = "completed"
 
                 context.iteration += 1
+                context_dict["iteration"] = context.iteration
+                self._progress.iteration = context.iteration
 
             # Final Phase: Response Planning (unless benign)
             if not early_terminated_benign:

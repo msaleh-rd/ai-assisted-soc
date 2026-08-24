@@ -149,3 +149,30 @@ async def test_dual_mode_orchestrator_react_supervisor_stream():
     assert "autonomous_react_supervisor" in combined
     assert "supervisor_thought" in combined
     assert "run_complete" in combined
+
+
+@pytest.mark.asyncio
+async def test_supervisor_iteration_increment_tracking():
+    """Verify that multi-step supervisor activity calls increment iterations in context history."""
+    context = InvestigationContext(alert_data=SAMPLE_ALERT, use_ai_planner=True)
+    context.add_entity("linuxshare", "host")
+
+    # Round 1 (iteration 0 -> 1)
+    context_dict = context.to_dict()
+    res1 = await supervisor_activity(context_dict)
+    context_dict = res1["context"]
+    assert len(context_dict["supervisor_history"]) == 1
+    assert context_dict["supervisor_history"][0]["iteration"] == 0
+
+    # Advance iteration
+    context_obj = InvestigationContext.from_dict(context_dict)
+    context_obj.iteration += 1
+    context_dict = context_obj.to_dict()
+    assert context_dict["iteration"] == 1
+
+    # Round 2 (iteration 1 -> 2)
+    res2 = await supervisor_activity(context_dict)
+    context_dict = res2["context"]
+    assert len(context_dict["supervisor_history"]) == 2
+    assert context_dict["supervisor_history"][1]["iteration"] == 1
+
