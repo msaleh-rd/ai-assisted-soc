@@ -136,6 +136,12 @@ class SupervisorAgent:
             return ip_match.group(0)
         # fallback string cleanup, remove quotes, etc.
         cleaned = re.sub(r'["\']', '', entity_str)
+        
+        # Check against common negative words from LLM conversational outputs
+        clean_strip = cleaned.strip()
+        if clean_strip.lower() in ["no", "none", "unknown", "n/a", "null", "false", "nothing"]:
+            return ""
+
         # If it's a short string, just return it
         if len(cleaned.split()) <= 2:
             return cleaned.strip()
