@@ -49,11 +49,37 @@ class InvestigationContext:
     rca_findings: Dict[str, Any] = field(default_factory=dict)
     causal_candidates: List[Dict[str, Any]] = field(default_factory=list)
     
-    # Adaptive Loop / Communication state
+    # Adaptive Loop / Communication / ReAct Supervisor state
     messages: List[AgentMessage] = field(default_factory=list)
     iteration: int = 0
-    max_iterations: int = 3
+    max_iterations: int = 4
     confidence_history: List[float] = field(default_factory=list)
+    supervisor_history: List[Dict[str, Any]] = field(default_factory=list)
+    pivot_entities: List[Dict[str, Any]] = field(default_factory=list)
+    completed_actions: List[str] = field(default_factory=list)
+
+    def add_entity(self, entity_id: str, entity_type: str = "unknown", is_pivot: bool = False) -> bool:
+        """Add an entity to the context if not already present. Returns True if newly added."""
+        if not entity_id:
+            return False
+        existing_ids = {e.get("id") for e in self.entities if isinstance(e, dict)}
+        if entity_id not in existing_ids:
+            ent = {"id": entity_id, "type": entity_type}
+            self.entities.append(ent)
+            if is_pivot:
+                self.pivot_entities.append(ent)
+            return True
+        return False
+
+    def record_supervisor_decision(self, decision: Dict[str, Any]) -> None:
+        """Record a supervisor step into history."""
+        self.supervisor_history.append({
+            "iteration": self.iteration,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            **decision
+        })
+        action_key = f"{decision.get('action')}:{','.join(decision.get('target_entities', []))}"
+        self.completed_actions.append(action_key)
 
     def post_message(self, msg_type: str, source: str, target: str, payload: Dict[str, Any]) -> None:
         """Post a new message to the blackboard."""
@@ -93,8 +119,6 @@ class InvestigationContext:
             for m in self.messages
         )
         
-        # We also trigger re-investigation if confidence is simply too low
-        # and we haven't given up yet.
         is_low_confidence = current_confidence > 0 and current_confidence < 0.7
         
         return has_pending_requests or is_low_confidence

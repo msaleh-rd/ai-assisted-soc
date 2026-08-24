@@ -126,6 +126,21 @@ async def planner_activity(alert_data: Dict[str, Any]) -> List[List[Dict]]:
     return temporal_plan
 
 
+@activity.defn(name="supervisor_activity")
+async def supervisor_activity(context_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Run the SupervisorAgent to dynamically decide the next investigation action."""
+    from backend.services.supervisor import SupervisorAgent
+    from backend.services.investigation_context import InvestigationContext
+    context = InvestigationContext.from_dict(context_dict)
+    supervisor = SupervisorAgent()
+    decision = await supervisor.decide_next_step(context)
+    context.record_supervisor_decision(decision.model_dump())
+    return {
+        "decision": decision.model_dump(),
+        "context": context.to_dict()
+    }
+
+
 @activity.defn(name="triage_activity")
 async def triage_activity(context_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Run the TriageAgent on the alert data."""
@@ -329,6 +344,7 @@ async def execute_response_activity(run_id: str, response_report: Dict[str, Any]
 # Map of activity names to functions (used by the worker to register)
 ALL_ACTIVITIES = [
     planner_activity,
+    supervisor_activity,
     triage_activity,
     evidence_activity,
     discovery_activity,
@@ -344,7 +360,7 @@ ALL_ACTIVITIES = [
 class InvestigationWorkflow:
     """
     Durable investigation workflow that:
-    1. Plans sub-tasks from the alert (same logic as OrchestratorAgent)
+    1. Plans sub-tasks or runs Autonomous ReAct Supervisor
     2. Executes each phase by invoking Activity functions
     3. Runs parallel activities within a phase via asyncio.gather
     4. Stores progress queryable via Temporal Queries
@@ -385,40 +401,6 @@ class InvestigationWorkflow:
         self._progress.status = "planning"
         self._progress.started_at = run_start.isoformat()
 
-        # ---- PLANNING ----
-        if input.use_ai_planner:
-            # AI Planner: call the planner activity to get a dynamic plan
-            plan = await workflow.execute_activity(
-                "planner_activity",
-                args=[input.alert_data],
-                start_to_close_timeout=timedelta(seconds=180),
-                retry_policy=RetryPolicy(
-                    initial_interval=timedelta(seconds=2),
-                    maximum_attempts=2,
-                ),
-            )
-            self._progress.plan_reasoning = "Generated dynamically by AI Planner based on alert context."
-        else:
-            # Static plan (deterministic, no IO)
-            from backend.services.pipeline_core import STATIC_PLAN_REASONING
-            plan = self._build_plan(input.alert_data)
-            self._progress.plan_reasoning = STATIC_PLAN_REASONING
-
-        self._progress.total_phases = len(plan)
-        self._progress.phases = [
-            {
-                "phase_num": i + 1,
-                "parallel": len(phase) > 1,
-                "agents": [t["agent"] for t in phase],
-                "status": "pending",
-            }
-            for i, phase in enumerate(plan)
-        ]
-        self._progress.status = "running"
-
-        # ---- EXECUTION ----
-        all_reports: Dict[str, Dict[str, Any]] = {}
-
         # Retry policy for all activities
         retry_policy = RetryPolicy(
             initial_interval=timedelta(seconds=1),
@@ -427,57 +409,130 @@ class InvestigationWorkflow:
             maximum_interval=timedelta(seconds=30),
         )
 
+        all_reports: Dict[str, Dict[str, Any]] = {}
+
         if input.use_ai_planner:
-            # ---- DYNAMIC EXECUTION (AI Planner path) ----
-            # Generic loop over however many phases the AI planned, with support for adaptive jump-backs
-            from backend.services.investigation_context import InvestigationContext
-            phase_idx = 0
-            while phase_idx < len(plan):
-                phase = plan[phase_idx]
-                self._progress.current_phase = phase_idx + 1
-                self._progress.phases[phase_idx]["status"] = "running"
+            # ---- AUTONOMOUS REACT SUPERVISOR PATH ----
+            self._progress.plan_reasoning = "Autonomous ReAct Supervisor engaged. Dynamic phase selection active."
+            self._progress.total_phases = context.max_iterations + 2
+            self._progress.status = "running"
 
-                results = await asyncio.gather(
-                    *[
-                        workflow.execute_activity(
-                            td["activity"],
-                            args=[context_dict],
-                            start_to_close_timeout=timedelta(seconds=180),
-                            retry_policy=retry_policy,
-                        )
-                        for td in phase
-                    ]
+            # Phase 1: Mandatory Triage
+            current_phase = 1
+            self._progress.current_phase = current_phase
+            self._progress.phases = [
+                {"phase_num": 1, "parallel": False, "agents": ["triage_agent"], "status": "running"}
+            ]
+
+            triage_res = await workflow.execute_activity(
+                "triage_activity",
+                args=[context_dict],
+                start_to_close_timeout=timedelta(seconds=180),
+                retry_policy=retry_policy,
+            )
+            context_dict = triage_res["context"]
+            all_reports["task-triage"] = triage_res["report"]
+            self._progress.completed_reports["task-triage"] = triage_res["report"]
+            self._progress.phases[0]["status"] = "completed"
+
+            # Dynamic Supervisor Loop
+            investigation_active = True
+            early_terminated_benign = False
+
+            while investigation_active and context.iteration < context.max_iterations:
+                current_phase += 1
+                self._progress.current_phase = current_phase
+
+                # Step 1: Supervisor Decision
+                sup_res = await workflow.execute_activity(
+                    "supervisor_activity",
+                    args=[context_dict],
+                    start_to_close_timeout=timedelta(seconds=180),
+                    retry_policy=retry_policy,
                 )
-                for td, res in zip(phase, results):
-                    context_dict = res["context"]
-                    all_reports[td["id"]] = res["report"]
-                    self._progress.completed_reports[td["id"]] = res["report"]
-                self._progress.phases[phase_idx]["status"] = "completed"
+                context_dict = sup_res["context"]
+                decision = sup_res["decision"]
+                action = decision.get("action")
 
-                # Check if we need to loop back due to Inter-Agent Communication (e.g. REQUEST_EVIDENCE)
-                ctx_obj = InvestigationContext.from_dict(context_dict)
-                if ctx_obj.needs_reinvestigation():
-                    evidence_idx = -1
-                    for i, p in enumerate(plan):
-                        if any(t["activity"] == "evidence_activity" for t in p):
-                            evidence_idx = i
-                            break
+                if action == "terminate_benign":
+                    early_terminated_benign = True
+                    investigation_active = False
+                    break
+
+                if action == "finalize_response":
+                    investigation_active = False
+                    break
+
+                # Step 2: Execute Chosen Action Activity
+                activity_map = {
+                    "gather_evidence": ("evidence_activity", "task-evidence"),
+                    "discover_network": ("discovery_activity", "task-discovery"),
+                    "compress_events": ("compression_activity", "task-compression"),
+                    "perform_rca": ("rca_activity", "task-rca"),
+                }
+
+                if action in activity_map:
+                    act_name, task_prefix = activity_map[action]
+                    task_id = f"{task_prefix}-iter{context.iteration + 1}"
                     
-                    if evidence_idx != -1 and evidence_idx <= phase_idx:
-                        ctx_obj.iteration += 1
-                        ctx_obj.confidence_history.append(ctx_obj.rca_findings.get("confidence_score", 0.0))
-                        context_dict = ctx_obj.to_dict()
-                        
-                        # Reset phases status so UI knows we went back
-                        for i in range(evidence_idx, phase_idx + 1):
-                            self._progress.phases[i]["status"] = "pending"
-                        
-                        phase_idx = evidence_idx
-                        continue
-                
-                phase_idx += 1
+                    self._progress.phases.append({
+                        "phase_num": current_phase,
+                        "parallel": False,
+                        "agents": [action],
+                        "status": "running"
+                    })
+
+                    act_res = await workflow.execute_activity(
+                        act_name,
+                        args=[context_dict],
+                        start_to_close_timeout=timedelta(seconds=180),
+                        retry_policy=retry_policy,
+                    )
+                    context_dict = act_res["context"]
+                    all_reports[task_id] = act_res["report"]
+                    self._progress.completed_reports[task_id] = act_res["report"]
+                    self._progress.phases[-1]["status"] = "completed"
+
+                context.iteration += 1
+
+            # Final Phase: Response Planning (unless benign)
+            if not early_terminated_benign:
+                current_phase += 1
+                self._progress.current_phase = current_phase
+                self._progress.phases.append({
+                    "phase_num": current_phase,
+                    "parallel": False,
+                    "agents": ["response_agent"],
+                    "status": "running"
+                })
+
+                resp_res = await workflow.execute_activity(
+                    "response_activity",
+                    args=[context_dict],
+                    start_to_close_timeout=timedelta(seconds=180),
+                    retry_policy=retry_policy,
+                )
+                context_dict = resp_res["context"]
+                all_reports["task-response"] = resp_res["report"]
+                self._progress.completed_reports["task-response"] = resp_res["report"]
+                self._progress.phases[-1]["status"] = "completed"
 
         else:
+            # ---- STATIC DETERMINISTIC 5-PHASE PATH ----
+            from backend.services.pipeline_core import STATIC_PLAN_REASONING
+            plan = self._build_plan(input.alert_data)
+            self._progress.plan_reasoning = STATIC_PLAN_REASONING
+            self._progress.total_phases = len(plan)
+            self._progress.phases = [
+                {
+                    "phase_num": i + 1,
+                    "parallel": len(phase) > 1,
+                    "agents": [t["agent"] for t in phase],
+                    "status": "pending",
+                }
+                for i, phase in enumerate(plan)
+            ]
+            self._progress.status = "running"
             # ---- STATIC EXECUTION (Legacy adaptive loop) ----
             # Phase 1: Triage
             phase_idx = 0

@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Literal
+from typing import List, Dict, Any, Literal, Optional
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 import os
@@ -14,17 +14,18 @@ MODEL_ROUTING = {
     "rca": os.getenv("LLM_RCA_MODEL", DEFAULT_MODEL),
     "response": os.getenv("LLM_RESPONSE_MODEL", DEFAULT_MODEL),
     "planner": os.getenv("LLM_PLANNER_MODEL", DEFAULT_MODEL),
+    "supervisor": os.getenv("LLM_SUPERVISOR_MODEL", DEFAULT_MODEL),
 }
 
 def get_llm(role: str = "default"):
     """Returns a configured LangChain ChatOpenAI instance pointing to local LM Studio.
     
     Args:
-        role: The role of the agent ('triage', 'rca', 'response', etc.) for model routing.
+        role: The role of the agent ('triage', 'rca', 'response', 'planner', 'supervisor') for model routing.
     """
     model_name = MODEL_ROUTING.get(role, DEFAULT_MODEL)
     
-    # Fast models for triage, powerful models for RCA/response
+    # Fast models for triage, powerful models for RCA/response/supervisor
     max_tokens = 512 if role == "triage" else 1024
     
     return ChatOpenAI(
@@ -56,6 +57,24 @@ class PlannerOutput(BaseModel):
     """Structured output from the AI investigation planner."""
     phases: List[List[PlannerTask]] = Field(description="Ordered list of phases. Each phase is a list of tasks that can run in parallel.")
     reasoning: str = Field(description="Explanation of why this plan was chosen for the given alert")
+
+
+class SupervisorDecision(BaseModel):
+    """Structured decision emitted by the Autonomous ReAct Investigation Supervisor."""
+    thought: str = Field(description="Step-by-step reasoning about current forensic evidence, gaps, and why this action is optimal")
+    action: Literal[
+        "gather_evidence",
+        "discover_network",
+        "compress_events",
+        "perform_rca",
+        "terminate_benign",
+        "finalize_response"
+    ] = Field(description="The next action to execute from the catalog")
+    target_entities: List[str] = Field(default_factory=list, description="Target entities (host, IP, user, file) to focus on")
+    target_skills: List[str] = Field(default_factory=list, description="Specific skills to deploy, e.g. 'edr-process-tree', 'network-flow-analyzer', 'identity-ad-lookup'")
+    specific_goal: str = Field(description="Specific forensic objective to accomplish with this action")
+    pivot_entity_detected: Optional[str] = Field(default=None, description="If a new lateral pivot entity was identified, specify its ID here")
+
 
 class TriageOutput(BaseModel):
     """Schema for the TriageAgent's structured output."""

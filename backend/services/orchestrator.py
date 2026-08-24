@@ -868,6 +868,8 @@ class ResponsePlannerAgent(BaseAgent):
 # Orchestrator Agent
 # ---------------------------------------------------------------------------
 
+from backend.services.supervisor import SupervisorAgent
+
 AGENT_REGISTRY: Dict[str, BaseAgent] = {
     "triage_agent": TriageAgent(),
     "evidence_agent": EvidenceAgent(),
@@ -875,6 +877,7 @@ AGENT_REGISTRY: Dict[str, BaseAgent] = {
     "compression_agent": CompressionAgent(),
     "rca_agent": RCAAnalystAgent(),
     "response_agent": ResponsePlannerAgent(),
+    "supervisor_agent": SupervisorAgent(),
 }
 
 
@@ -882,7 +885,7 @@ class OrchestratorAgent:
     """
     Main orchestrator that:
     1. Receives a high-level task
-    2. Plans sub-tasks (with dependency graph)
+    2. Plans sub-tasks or runs Autonomous ReAct Supervisor
     3. Dispatches to specialized agents (parallel where possible)
     4. Streams progress via SSE
     5. Synthesizes final answer
@@ -890,6 +893,7 @@ class OrchestratorAgent:
 
     def __init__(self):
         self.agents = AGENT_REGISTRY
+        self.supervisor = SupervisorAgent()
 
     async def plan(self, task: str, alert_data: Dict[str, Any], use_ai_planner: bool = False) -> ExecutionPlan:
         """Create an execution plan for the given task.
@@ -905,23 +909,36 @@ class OrchestratorAgent:
         return build_static_plan_subtasks()
 
     async def execute_stream(self, task: str, alert_data: Dict[str, Any], use_ai_planner: bool = False) -> AsyncGenerator[str, None]:
-        """Execute the plan and yield SSE events for each step."""
+        """Execute the investigation and yield SSE events for each step.
+        
+        Dual-mode support:
+        - use_ai_planner=False: Fast, deterministic 5-phase execution.
+        - use_ai_planner=True: Autonomous ReAct Supervisor dynamically driving phases.
+        """
+        if use_ai_planner:
+            async for evt in self._execute_stream_react_supervisor(task, alert_data):
+                yield evt
+        else:
+            async for evt in self._execute_stream_static(task, alert_data):
+                yield evt
+
+    async def _execute_stream_static(self, task: str, alert_data: Dict[str, Any]) -> AsyncGenerator[str, None]:
+        """Fast, deterministic 5-phase execution for standard triage."""
         run_id = f"run-{uuid.uuid4().hex[:8]}"
         run_start = time.time()
-        
-        context = InvestigationContext(alert_data=alert_data, use_ai_planner=use_ai_planner)
+        context = InvestigationContext(alert_data=alert_data, use_ai_planner=False)
 
-        # --- PLANNING PHASE ---
+        # Planning Phase
         yield sse_event("run_start", {
             "run_id": run_id,
             "task": task,
             "status": "planning",
+            "mode": "deterministic_static",
             "timestamp": datetime.now().isoformat(),
         })
 
-        await asyncio.sleep(0.2)  # Brief pause so UI sees planning state
-
-        plan = await self.plan(task, alert_data, use_ai_planner=use_ai_planner)
+        await asyncio.sleep(0.1)
+        plan = await self.plan(task, alert_data, use_ai_planner=False)
 
         yield sse_event("plan_created", {
             "run_id": run_id,
@@ -949,21 +966,20 @@ class OrchestratorAgent:
             ],
         })
 
-        # --- DYNAMIC EXECUTION PHASE ---
         all_reports: Dict[str, AgentReport] = {}
-        
+
         for phase_idx, phase_tasks in enumerate(plan.phases):
             phase_num = phase_idx + 1
             is_parallel = len(phase_tasks) > 1
             agent_names = [t.agent_name for t in phase_tasks]
-            
+
             yield sse_event("phase_start", {
                 "run_id": run_id,
                 "phase_num": phase_num,
                 "parallel": is_parallel,
                 "agents": agent_names
             })
-            
+
             coros = []
             for task_def in phase_tasks:
                 yield sse_event("agent_start", {
@@ -1015,10 +1031,10 @@ class OrchestratorAgent:
                         "task_id": task_def.id,
                         "report": report.to_dict()
                     })
-            
+
             yield sse_event("phase_complete", {"run_id": run_id, "phase_num": phase_num})
 
-            # If RCA Agent just executed and confidence is low, trigger adaptive re-investigation
+            # Adaptive fallback loop for low confidence RCA
             if any(t.agent_name == "rca_agent" for t in phase_tasks):
                 while context.needs_reinvestigation():
                     context.iteration += 1
@@ -1029,31 +1045,26 @@ class OrchestratorAgent:
                         "confidence": context.rca_findings.get("confidence_score", 0.0),
                         "reason": "RCA confidence low or pending evidence requests, re-investigating..."
                     })
-                    
-                    # Re-run Evidence and RCA
                     re_evidence = self.agents["evidence_agent"]
                     re_rca = self.agents["rca_agent"]
                     try:
                         ev_rep = await re_evidence.execute({}, context)
                         all_reports[f"task-evidence-iter{context.iteration}"] = ev_rep
-                    except Exception as e:
+                    except Exception:
                         pass
                     try:
                         rca_rep = await re_rca.execute({}, context)
                         all_reports[f"task-rca-iter{context.iteration}"] = rca_rep
-                    except Exception as e:
+                    except Exception:
                         pass
 
-        # --- SYNTHESIS PHASE ---
+        # Synthesis
         yield sse_event("synthesis_start", {
             "run_id": run_id,
             "timestamp": datetime.now().isoformat(),
         })
-
-        await asyncio.sleep(0.3)
-
+        await asyncio.sleep(0.2)
         synthesis = self._synthesize(all_reports, plan, context)
-
         total_duration = int((time.time() - run_start) * 1000)
 
         yield sse_event("run_complete", {
@@ -1064,7 +1075,192 @@ class OrchestratorAgent:
             "timestamp": datetime.now().isoformat(),
         })
 
-    def _synthesize(self, reports: Dict[str, AgentReport], plan: ExecutionPlan, context: InvestigationContext = None) -> Dict[str, Any]:
+    async def _execute_stream_react_supervisor(self, task: str, alert_data: Dict[str, Any]) -> AsyncGenerator[str, None]:
+        """Autonomous ReAct Investigation Supervisor dynamically selecting phases and actions."""
+        run_id = f"run-{uuid.uuid4().hex[:8]}"
+        run_start = time.time()
+        context = InvestigationContext(alert_data=alert_data, use_ai_planner=True)
+
+        yield sse_event("run_start", {
+            "run_id": run_id,
+            "task": task,
+            "status": "planning",
+            "mode": "autonomous_react_supervisor",
+            "timestamp": datetime.now().isoformat(),
+        })
+
+        yield sse_event("plan_created", {
+            "run_id": run_id,
+            "plan_id": f"plan-react-{run_id}",
+            "objective": "Autonomous ReAct Investigation Loop",
+            "reasoning": "Observation-driven investigation dynamically directed by Supervisor Agent.",
+            "total_phases": context.max_iterations + 2,
+            "total_tasks": context.max_iterations + 2,
+            "phases": [
+                {"phase_num": 1, "parallel": False, "agents": ["triage_agent"], "status": "pending"},
+                {"phase_num": 2, "parallel": False, "agents": ["supervisor_agent"], "status": "pending"},
+            ]
+        })
+
+        all_reports: Dict[str, AgentReport] = {}
+        current_phase_num = 1
+
+        # Phase 1: Mandatory Triage
+        yield sse_event("phase_start", {
+            "run_id": run_id,
+            "phase_num": current_phase_num,
+            "parallel": False,
+            "agents": ["triage_agent"]
+        })
+        yield sse_event("agent_start", {
+            "run_id": run_id,
+            "phase_num": current_phase_num,
+            "agent_name": "triage_agent",
+            "task_id": "task-triage",
+            "description": "Initial alert triage, classification, and entity extraction",
+            "parallel": False,
+            "timestamp": datetime.now().isoformat()
+        })
+        triage_report = await self.agents["triage_agent"].execute({}, context)
+        all_reports["task-triage"] = triage_report
+        yield sse_event("agent_complete", {
+            "run_id": run_id,
+            "phase_num": current_phase_num,
+            "agent_name": "triage_agent",
+            "task_id": "task-triage",
+            "report": triage_report.to_dict()
+        })
+        yield sse_event("phase_complete", {"run_id": run_id, "phase_num": current_phase_num})
+
+        # Phase 2+: Dynamic ReAct Supervisor Loop
+        investigation_active = True
+        early_terminated_benign = False
+
+        while investigation_active and context.iteration < context.max_iterations:
+            current_phase_num += 1
+            
+            # Step 1: Supervisor Decision
+            decision = await self.supervisor.decide_next_step(context)
+            context.record_supervisor_decision(decision.model_dump())
+
+            yield sse_event("supervisor_thought", {
+                "run_id": run_id,
+                "iteration": context.iteration + 1,
+                "thought": decision.thought,
+                "action": decision.action,
+                "target_entities": decision.target_entities,
+                "target_skills": decision.target_skills,
+                "specific_goal": decision.specific_goal,
+                "pivot_entity_detected": decision.pivot_entity_detected,
+                "timestamp": datetime.now().isoformat()
+            })
+
+            # Check termination conditions
+            if decision.action == "terminate_benign":
+                early_terminated_benign = True
+                investigation_active = False
+                yield sse_event("investigation_terminated_early", {
+                    "run_id": run_id,
+                    "reason": "Supervisor confirmed benign/false positive activity",
+                    "thought": decision.thought
+                })
+                break
+
+            if decision.action == "finalize_response":
+                investigation_active = False
+                break
+
+            # Step 2: Execute Chosen Action
+            yield sse_event("phase_start", {
+                "run_id": run_id,
+                "phase_num": current_phase_num,
+                "parallel": False,
+                "agents": [decision.action]
+            })
+
+            task_id = f"task-{decision.action}-iter{context.iteration + 1}"
+            yield sse_event("agent_start", {
+                "run_id": run_id,
+                "phase_num": current_phase_num,
+                "agent_name": decision.action,
+                "task_id": task_id,
+                "description": decision.specific_goal,
+                "parallel": False,
+                "timestamp": datetime.now().isoformat()
+            })
+
+            step_report = None
+            if decision.action == "gather_evidence":
+                step_report = await self.agents["evidence_agent"].execute({}, context)
+            elif decision.action == "discover_network":
+                step_report = await self.agents["discovery_agent"].execute({}, context)
+            elif decision.action == "compress_events":
+                step_report = await self.agents["compression_agent"].execute({}, context)
+            elif decision.action == "perform_rca":
+                step_report = await self.agents["rca_agent"].execute({}, context)
+                if "confidence_score" in context.rca_findings:
+                    context.confidence_history.append(context.rca_findings["confidence_score"])
+            
+            if step_report:
+                all_reports[task_id] = step_report
+                yield sse_event("agent_complete", {
+                    "run_id": run_id,
+                    "phase_num": current_phase_num,
+                    "agent_name": decision.action,
+                    "task_id": task_id,
+                    "report": step_report.to_dict()
+                })
+
+            yield sse_event("phase_complete", {"run_id": run_id, "phase_num": current_phase_num})
+            context.iteration += 1
+
+        # Phase Final: Response Planning (unless terminated early as benign)
+        if not early_terminated_benign:
+            current_phase_num += 1
+            yield sse_event("phase_start", {
+                "run_id": run_id,
+                "phase_num": current_phase_num,
+                "parallel": False,
+                "agents": ["response_agent"]
+            })
+            yield sse_event("agent_start", {
+                "run_id": run_id,
+                "phase_num": current_phase_num,
+                "agent_name": "response_agent",
+                "task_id": "task-response",
+                "description": "Generate prioritized containment and remediation response plan",
+                "parallel": False,
+                "timestamp": datetime.now().isoformat()
+            })
+            response_report = await self.agents["response_agent"].execute({}, context)
+            all_reports["task-response"] = response_report
+            yield sse_event("agent_complete", {
+                "run_id": run_id,
+                "phase_num": current_phase_num,
+                "agent_name": "response_agent",
+                "task_id": "task-response",
+                "report": response_report.to_dict()
+            })
+            yield sse_event("phase_complete", {"run_id": run_id, "phase_num": current_phase_num})
+
+        # Synthesis
+        yield sse_event("synthesis_start", {
+            "run_id": run_id,
+            "timestamp": datetime.now().isoformat(),
+        })
+        await asyncio.sleep(0.2)
+        synthesis = self._synthesize(all_reports, None, context)
+        total_duration = int((time.time() - run_start) * 1000)
+
+        yield sse_event("run_complete", {
+            "run_id": run_id,
+            "status": "completed",
+            "total_duration_ms": total_duration,
+            "synthesis": synthesis,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+    def _synthesize(self, reports: Dict[str, AgentReport], plan: Optional[ExecutionPlan], context: InvestigationContext = None) -> Dict[str, Any]:
         """Synthesize all agent reports into a final summary."""
         from backend.services.pipeline_core import synthesize_reports
         return synthesize_reports(reports, context)
