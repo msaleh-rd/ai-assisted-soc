@@ -1257,6 +1257,7 @@ function resetOrchUI() {
     document.getElementById('orchDag').innerHTML = '';
     const pendingBtn = document.getElementById('orchPendingBtn');
     if (pendingBtn) pendingBtn.style.display = 'none';
+}
 // === Agent Orchestrator Dynamic DAG Architecture ===
 const AGENT_REGISTRY = {
     'triage_agent': { label: 'Triage & Scope', icon: '🔍', color: '#38bdf8', category: 'Intake' },
