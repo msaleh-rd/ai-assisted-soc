@@ -320,6 +320,15 @@ class EvidenceAgent(BaseAgent):
         context.entity_graph = entity_graph
         context.relationships = relationships
 
+        high_risk_iocs = [
+            f"{k.replace('file:', '').replace('ip:', '').replace('host:', '').replace('user:', '')} (Risk: {v.get('risk_score', 0)})"
+            for k, v in entity_graph.items()
+            if v.get("risk_score", 0) >= 0.6
+        ]
+        risk_note = f" Flagged IOCs: {', '.join(high_risk_iocs)}." if high_risk_iocs else ""
+        skills_str = ", ".join(sorted(list(deployed_skills))) if deployed_skills else "EDR & SIEM connectors"
+        summary_text = f"Expanded {len(all_entities)} seed entities into {len(entity_graph)} graph nodes using {len(deployed_skills)} agentic skills ({skills_str}).{risk_note}"
+
         return AgentReport(
             agent_name=self.name,
             task="Collect evidence for identified entities",
@@ -336,7 +345,8 @@ class EvidenceAgent(BaseAgent):
                 "skills_used": sorted(list(deployed_skills)) if deployed_skills else ["edr-process-tree", "threat-intel-lookup", "identity-ad-lookup"],
                 "skill_deployments": skill_deployments,
                 "data_sources_queried": ["EDR", "SIEM", "Active Directory", "Threat Intel", "Network Telemetry"],
-                "enrichment_summary": f"Expanded {len(all_entities)} seed entities into {len(entity_graph)} nodes using {len(deployed_skills)} agentic skills.",
+                "enrichment_summary": summary_text,
+                "summary": summary_text,
             },
             confidence=0.9,
             artifacts=["entity_graph", "relationship_map", "evidence_timeline"],

@@ -1304,6 +1304,12 @@ function handleOrchEvent(type, data) {
             addPendingApproval(data.workflow_id);
             break;
 
+        case 'supervisor_thought':
+            const targets = (data.target_entities || []).join(', ') || 'infrastructure';
+            const pivotNote = data.pivot_entity_detected ? ` [🎯 Pivot IOC: ${data.pivot_entity_detected}]` : '';
+            addOrchLog('info', 'supervisor', `Step ${data.iteration}/4 Thought: "${data.thought.slice(0, 140)}..." ➔ Action: ${data.action} on [${targets}]${pivotNote}`);
+            break;
+
         case 'agent_start':
             setAgentNodeState(data.agent_name, 'running');
             addOrchLog(type, data.agent_name, `Started: ${data.description}`);
@@ -1313,7 +1319,7 @@ function handleOrchEvent(type, data) {
             const report = data.report;
             const state = report.status === 'completed' ? 'completed' : 'failed';
             setAgentNodeState(data.agent_name, state);
-            const summary = report.findings?.summary || report.findings?.initial_assessment || `Done in ${report.duration_ms}ms`;
+            const summary = getAgentLogSummary(report);
             addOrchLog(type, data.agent_name, `Completed (${report.duration_ms}ms) — ${summary}`);
             addAgentReport(report);
             break;
@@ -1508,6 +1514,8 @@ function renderSynthesis(synthesis, totalMs) {
 function formatAgentName(name) {
     const names = {
         orchestrator: '🎯 Orchestrator',
+        supervisor: '🧠 Supervisor',
+        supervisor_agent: '🧠 Supervisor',
         triage_agent: '🔍 Triage',
         evidence_agent: '📊 Evidence',
         discovery_agent: '🌐 Discovery',
@@ -1516,6 +1524,86 @@ function formatAgentName(name) {
         response_agent: '⚡ Response',
     };
     return names[name] || name;
+}
+
+function getAgentLogSummary(report) {
+    if (!report || !report.findings) return `Done in ${report?.duration_ms || 0}ms`;
+    const f = report.findings;
+    const name = (report.agent_name || '').toLowerCase();
+
+    // 1. Triage Agent
+    if (name.includes('triage')) {
+        const mitre = f.technique ? ` • MITRE: ${f.technique}` : '';
+        const sev = f.severity ? ` • Severity: ${f.severity}` : '';
+        const entCount = f.entity_count !== undefined ? ` • ${f.entity_count} entities extracted` : '';
+        const assessment = f.initial_assessment || f.summary || 'Alert triaged and classified.';
+        return `${assessment}${mitre}${sev}${entCount}`;
+    }
+
+    // 2. Evidence Agent
+    if (name.includes('evidence')) {
+        const entCount = f.entity_graph_size !== undefined ? f.entity_graph_size : (Object.keys(f.entity_graph || {}).length);
+        const relCount = f.relationships_found !== undefined ? f.relationships_found : (f.relationships?.length || 0);
+        const skillsCount = f.skills_used?.length || 0;
+        
+        // Find high risk entities (risk >= 0.6)
+        const highRisk = Object.entries(f.entity_graph || {})
+            .filter(([_, v]) => (v.risk_score || 0) >= 0.6)
+            .map(([k, v]) => `${k.replace(/^(file|host|ip|user):/, '')} (Risk: ${v.risk_score})`);
+        
+        const riskNote = highRisk.length ? ` • Flagged IOCs: ${highRisk.join(', ')}` : '';
+        const skillsList = f.skills_used && f.skills_used.length > 0 ? ` [${f.skills_used.slice(0, 3).join(', ')}${f.skills_used.length > 3 ? '...' : ''}]` : '';
+        
+        const base = f.summary || f.enrichment_summary || `Expanded into ${entCount} nodes and ${relCount} relationships using ${skillsCount} skills${skillsList}.`;
+        return `${base}${riskNote}`;
+    }
+
+    // 3. Compression Agent
+    if (name.includes('compression')) {
+        const orig = f.original_events !== undefined ? f.original_events : 0;
+        const comp = f.compressed_events !== undefined ? f.compressed_events : 0;
+        const ratio = f.compression_ratio || (orig > 0 ? (orig / (comp || 1)).toFixed(1) + 'x' : '1.0x');
+        const patterns = f.patterns_detected && f.patterns_detected.length > 0 ? ` • Patterns: ${f.patterns_detected.length} detected` : '';
+        
+        const topEvent = f.timeline && f.timeline.length > 0 ? f.timeline[0] : null;
+        const topEventNote = topEvent && topEvent.action && topEvent.action !== 'UNKNOWN' ? ` • Milestone: "${topEvent.action.slice(0, 60)}..."` : '';
+        
+        return f.summary || `Compressed ${orig} raw events down to ${comp} milestones (${ratio} reduction) through 5 agentic skills.${patterns}${topEventNote}`;
+    }
+
+    // 4. Discovery Agent
+    if (name.includes('discovery')) {
+        const scanned = f.targets_scanned !== undefined ? f.targets_scanned : (f.hosts?.length || 0);
+        const reachable = (f.hosts || []).filter(h => h.status === 'reachable' || h.status === 'open').length;
+        return f.summary || `Network scan completed on ${scanned} target(s). Reachable: ${reachable}.`;
+    }
+
+    // 5. RCA Agent
+    if (name.includes('rca')) {
+        const rootCause = f.root_cause || f.summary || 'Root cause identified.';
+        const phases = f.attack_phases && f.attack_phases.length > 0 ? ` • Attack Chain: ${f.attack_phases.length} phases` : '';
+        const blast = f.blast_radius ? ` • Blast Radius: ${f.blast_radius} nodes` : '';
+        const conf = f.confidence_score !== undefined ? ` • Confidence: ${Math.round(f.confidence_score * 100)}%` : '';
+        return `${rootCause}${phases}${blast}${conf}`;
+    }
+
+    // 6. Response Agent
+    if (name.includes('response')) {
+        const actions = f.actions_recommended || [];
+        const actionCount = actions.length;
+        const topActions = actions.slice(0, 3).map(a => `${a.action_type || a.name || 'action'} (${a.priority || 'Normal'})`).join(', ');
+        const actionsSummary = actionCount > 0 ? ` • Playbook [${actionCount} actions: ${topActions}]` : '';
+        const challenges = (f.agent_messages || []).filter(m => m.msg_type === 'CHALLENGE');
+        const challengeNote = challenges.length ? ` ⚠️ [CHALLENGE: Destructive actions guarded]` : '';
+        return `${f.summary || 'Response containment plan generated.'}${actionsSummary}${challengeNote}`;
+    }
+
+    // 7. Supervisor Agent
+    if (name.includes('supervisor')) {
+        return f.thought || f.summary || f.specific_goal || `Forensic step completed.`;
+    }
+
+    return f.summary || f.initial_assessment || f.enrichment_summary || f.root_cause || `Done in ${report.duration_ms}ms`;
 }
 
 function escapeHtml(str) {

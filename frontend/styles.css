@@ -634,6 +634,7 @@ textarea.code-input {
 .log-entry.event-agent_start .log-msg { color: var(--accent); }
 .log-entry.event-agent_complete .log-msg { color: #34d399; }
 .log-entry.event-plan_created .log-msg { color: #fbbf24; }
+.log-entry.event-supervisor_thought .log-msg { color: #38bdf8; }
 .log-entry.event-run_complete .log-msg { color: #34d399; font-weight: 600; }
 
 /* Agent Reports */
