@@ -2809,19 +2809,6 @@ function renderCompressionInspectorView(report, tabs, body) {
             ${subgraphHtml}
         </div>
     `;
-                <div id="subgraphCanvasTooltip" class="subgraph-canvas-tooltip"></div>
-                <div class="subgraph-canvas-legend">
-                    <span><span style="color:#ef4444; font-weight:bold;">●</span> Malicious File / Ransomware</span>
-                    <span><span style="color:#38bdf8; font-weight:bold;">●</span> Threat Actor / Remote C2</span>
-                    <span><span style="color:#a78bfa; font-weight:bold;">●</span> Compromised Host / Network</span>
-                    <span><span style="color:#10b981; font-weight:bold;">●</span> SIEM / Monitoring Service</span>
-                </div>
-            </div>
-
-            <h4 style="margin-top:16px; margin-bottom:10px; font-size:0.85rem; color:#94a3b8; text-transform:uppercase; letter-spacing:0.05em;">Categorized Attack Subgraph Elements</h4>
-            ${subgraphHtml}
-        </div>
-    `;
 }
 
 // Interactive Canvas Attack Subgraph Renderer
