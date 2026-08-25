@@ -2527,6 +2527,10 @@ function switchPhaseModalTab(tabId) {
     const activePane = document.getElementById(`phaseTabPane-${tabId}`);
     if (activeBtn) activeBtn.classList.add('active');
     if (activePane) activePane.style.display = 'block';
+
+    if (tabId === 'subgraph' && _activeInspectorReport) {
+        setTimeout(() => initCompressionSubgraphCanvas(_activeInspectorReport), 60);
+    }
 }
 
 // ------------------------------------------------------------
@@ -2536,17 +2540,18 @@ function renderCompressionInspectorView(report, tabs, body) {
     const findings = report.findings || {};
     const origCount = findings.original_events || (_activeInspectorRawLogs ? _activeInspectorRawLogs.length : 0);
     const compCount = findings.compressed_events || (findings.timeline ? findings.timeline.length : 0);
+    const timeline = findings.timeline || [];
+    const timelineCount = timeline.length;
     const ratio = findings.compression_ratio || (origCount > 0 && compCount > 0 ? `${(origCount / compCount).toFixed(1)}x` : 'N/A');
     const stages = findings.stages || [];
-    const timeline = findings.timeline || [];
     const attackGraph = findings.attack_graph || {};
 
     // Tabs
     tabs.innerHTML = `
         <button class="phase-tab-btn active" id="phaseTabBtn-funnel" onclick="switchPhaseModalTab('funnel')">🗜️ 7-Stage Funnel Breakdown</button>
         <button class="phase-tab-btn" id="phaseTabBtn-rawlogs" onclick="switchPhaseModalTab('rawlogs')">📥 Raw Ingested Logs (${origCount})</button>
-        <button class="phase-tab-btn" id="phaseTabBtn-milestones" onclick="switchPhaseModalTab('milestones')">📤 Compressed Attack Milestones (${compCount})</button>
-        <button class="phase-tab-btn" id="phaseTabBtn-subgraph" onclick="switchPhaseModalTab('subgraph')">🕸️ Attack Graph Subgraph</button>
+        <button class="phase-tab-btn" id="phaseTabBtn-milestones" onclick="switchPhaseModalTab('milestones')">📤 Compressed Milestones (${timelineCount})</button>
+        <button class="phase-tab-btn" id="phaseTabBtn-subgraph" onclick="switchPhaseModalTab('subgraph')">🕸️ Interactive Attack Graph</button>
     `;
 
     // KPI Cards
@@ -2560,7 +2565,7 @@ function renderCompressionInspectorView(report, tabs, body) {
             <div class="phase-kpi-card">
                 <span class="phase-kpi-label">Compressed Milestones</span>
                 <span class="phase-kpi-val" style="color: #34d399;">${compCount}</span>
-                <span class="phase-kpi-sub">High-signal causal events</span>
+                <span class="phase-kpi-sub">${timelineCount} synthesized timeline steps</span>
             </div>
             <div class="phase-kpi-card">
                 <span class="phase-kpi-label">Noise Reduction Ratio</span>
@@ -2650,11 +2655,11 @@ function renderCompressionInspectorView(report, tabs, body) {
     });
 
     // Subgraph categories
-    let subgraphHtml = '<div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:16px;">';
+    let subgraphHtml = '<div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px;">';
     for (const [cat, items] of Object.entries(attackGraph || {})) {
         subgraphHtml += `
-            <div style="background:#111827; border:1px solid #1f2937; border-radius:8px; padding:16px;">
-                <h4 style="margin-top:0; color:#38bdf8; text-transform:uppercase; font-size:0.8rem; letter-spacing:0.05em;">${escapeHtml(cat.replace(/_/g, ' '))}</h4>
+            <div style="background:#111827; border:1px solid #1f2937; border-radius:8px; padding:12px;">
+                <h4 style="margin-top:0; color:#38bdf8; text-transform:uppercase; font-size:0.78rem; letter-spacing:0.05em;">${escapeHtml(cat.replace(/_/g, ' '))}</h4>
                 <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:8px;">
                     ${(Array.isArray(items) ? items : []).map(it => `<span class="artifact-tag" style="background:#1e293b; color:#f8fafc;">${escapeHtml(it)}</span>`).join('')}
                 </div>
@@ -2719,7 +2724,7 @@ function renderCompressionInspectorView(report, tabs, body) {
 
         <!-- Tab 3: Milestones -->
         <div class="phase-modal-tab-pane" id="phaseTabPane-milestones" style="display: none;">
-            <h3 style="margin-bottom:12px; font-size:1rem; color:#f8fafc;">High-Signal Attack Milestones (${compCount})</h3>
+            <h3 style="margin-bottom:12px; font-size:1rem; color:#f8fafc;">High-Signal Attack Milestones (${timelineCount})</h3>
             <div style="max-height: 520px; overflow-y: auto;">
                 ${milestonesHtml || '<div style="color:#64748b; text-align:center; padding:30px;">No milestones generated</div>'}
             </div>
@@ -2727,10 +2732,273 @@ function renderCompressionInspectorView(report, tabs, body) {
 
         <!-- Tab 4: Subgraph -->
         <div class="phase-modal-tab-pane" id="phaseTabPane-subgraph" style="display: none;">
-            <h3 style="margin-bottom:12px; font-size:1rem; color:#f8fafc;">Extracted Causal Attack Subgraph</h3>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                <h3 style="margin:0; font-size:1rem; color:#f8fafc;">Interactive Causal Attack Graph</h3>
+                <button onclick="initCompressionSubgraphCanvas(_activeInspectorReport)" style="background:#1e293b; border:1px solid #475569; color:#94a3b8; padding:3px 10px; border-radius:4px; font-size:0.75rem; cursor:pointer; font-weight:600;">🔄 Reset Layout</button>
+            </div>
+
+            <div class="subgraph-canvas-container" id="subgraphCanvasContainer">
+                <canvas id="compressionSubgraphCanvas"></canvas>
+                <div id="subgraphCanvasTooltip" class="subgraph-canvas-tooltip"></div>
+                <div class="subgraph-canvas-legend">
+                    <span><span style="color:#ef4444; font-weight:bold;">●</span> Malicious File / Ransomware</span>
+                    <span><span style="color:#38bdf8; font-weight:bold;">●</span> Threat Actor / Remote C2</span>
+                    <span><span style="color:#a78bfa; font-weight:bold;">●</span> Compromised Host / Network</span>
+                    <span><span style="color:#10b981; font-weight:bold;">●</span> SIEM / Monitoring Service</span>
+                </div>
+            </div>
+
+            <h4 style="margin-top:16px; margin-bottom:10px; font-size:0.85rem; color:#94a3b8; text-transform:uppercase; letter-spacing:0.05em;">Categorized Attack Subgraph Elements</h4>
             ${subgraphHtml}
         </div>
     `;
+}
+
+// Interactive Canvas Attack Subgraph Renderer
+function initCompressionSubgraphCanvas(report) {
+    if (!report || !report.findings) return;
+    const canvas = document.getElementById('compressionSubgraphCanvas');
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    const container = document.getElementById('subgraphCanvasContainer');
+    const width = container ? container.clientWidth : 850;
+    const height = 380;
+    canvas.width = width;
+    canvas.height = height;
+
+    const attackGraph = report.findings.attack_graph || {};
+    const timeline = report.findings.timeline || [];
+
+    // Collect unique entity nodes
+    const nodeMap = new Map();
+    const addNode = (name, type, risk = 0.5) => {
+        if (!name || name === 'unknown') return;
+        if (!nodeMap.has(name)) {
+            let nType = type;
+            let nRisk = risk;
+            let icon = '📦';
+            let color = '#94a3b8';
+
+            const lower = name.toLowerCase();
+            if (lower.includes('donotcry') || lower.includes('ransomware') || lower.includes('malware') || lower.includes('.sh') || lower.includes('.elf')) {
+                nType = 'malware';
+                nRisk = 0.95;
+                icon = '💀';
+                color = '#ef4444';
+            } else if (lower.includes('192.42.') || lower.includes('c2') || /^\d+\.\d+\.\d+\.\d+$/.test(name)) {
+                nType = 'c2_ip';
+                nRisk = 0.90;
+                icon = '🌐';
+                color = '#38bdf8';
+            } else if (lower.includes('linuxshare') || lower.includes('host') || lower.includes('srv') || lower.includes('share')) {
+                nType = 'host';
+                nRisk = 0.80;
+                icon = '🖥️';
+                color = '#a78bfa';
+            } else if (lower.includes('inetfw') || lower.includes('fw') || lower.includes('firewall') || lower.includes('router')) {
+                nType = 'firewall';
+                nRisk = 0.70;
+                icon = '🛡️';
+                color = '#f59e0b';
+            } else if (lower.includes('wazuh') || lower.includes('suricata') || lower.includes('siem') || lower.includes('audit')) {
+                nType = 'security_tool';
+                nRisk = 0.20;
+                icon = '📡';
+                color = '#10b981';
+            }
+
+            nodeMap.set(name, { id: name, name, type: nType, risk_score: nRisk, icon, color });
+        }
+    };
+
+    // Populate nodes from attack categories
+    for (const [cat, items] of Object.entries(attackGraph)) {
+        (Array.isArray(items) ? items : []).forEach(it => addNode(it, cat));
+    }
+    // Also include entities from timeline
+    timeline.forEach(tl => {
+        if (tl.entity) addNode(tl.entity, 'timeline_entity', tl.risk_score || 0.5);
+    });
+
+    const nodesList = Array.from(nodeMap.values());
+    if (nodesList.length === 0) {
+        ctx.fillStyle = '#64748b';
+        ctx.font = '14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('No connected attack nodes discovered in this subgraph.', width / 2, height / 2);
+        return;
+    }
+
+    // Position nodes radially around center
+    const cx = width / 2;
+    const cy = height / 2;
+    const radiusX = Math.min(width * 0.38, 280);
+    const radiusY = Math.min(height * 0.36, 120);
+
+    nodesList.forEach((n, idx) => {
+        const angle = (idx / nodesList.length) * 2 * Math.PI - Math.PI / 2;
+        n.x = cx + radiusX * Math.cos(angle);
+        n.y = cy + radiusY * Math.sin(angle);
+        n.radius = 24;
+    });
+
+    // Build directed attack edges based on attackGraph categories & flow
+    const edges = [];
+    const ipNode = nodesList.find(n => n.type === 'c2_ip');
+    const malwareNode = nodesList.find(n => n.type === 'malware');
+    const hostNode = nodesList.find(n => n.type === 'host');
+    const fwNode = nodesList.find(n => n.type === 'firewall');
+    const siemNode = nodesList.find(n => n.type === 'security_tool');
+
+    if (ipNode && malwareNode) {
+        edges.push({ source: ipNode, target: malwareNode, label: 'C2 Ingress', color: '#f87171' });
+    }
+    if (ipNode && fwNode) {
+        edges.push({ source: ipNode, target: fwNode, label: 'Exfiltration Attempt', color: '#38bdf8' });
+    }
+    if (fwNode && hostNode) {
+        edges.push({ source: fwNode, target: hostNode, label: 'Lateral Movement', color: '#fbbf24' });
+    }
+    if (malwareNode && hostNode) {
+        edges.push({ source: malwareNode, target: hostNode, label: 'Encryption Execution', color: '#ef4444' });
+    }
+    if (siemNode && hostNode) {
+        edges.push({ source: siemNode, target: hostNode, label: 'Telemetry Monitoring', color: '#34d399' });
+    }
+
+    // If few edges, connect remaining nodes into a structured ring
+    if (edges.length === 0 && nodesList.length > 1) {
+        for (let i = 0; i < nodesList.length - 1; i++) {
+            edges.push({ source: nodesList[i], target: nodesList[i + 1], label: 'Correlated Link', color: '#64748b' });
+        }
+    }
+
+    const tooltip = document.getElementById('subgraphCanvasTooltip');
+    let hoveredNode = null;
+
+    function renderCanvas() {
+        ctx.clearRect(0, 0, width, height);
+
+        // Background subtle grid
+        ctx.strokeStyle = 'rgba(51, 65, 85, 0.25)';
+        ctx.lineWidth = 1;
+        for (let x = 0; x < width; x += 30) {
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+        }
+        for (let y = 0; y < height; y += 30) {
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+        }
+
+        // Draw Edges with arrowheads & labels
+        edges.forEach(e => {
+            const isHovered = hoveredNode && (hoveredNode === e.source || hoveredNode === e.target);
+            ctx.beginPath();
+            ctx.moveTo(e.source.x, e.source.y);
+            ctx.lineTo(e.target.x, e.target.y);
+            ctx.strokeStyle = isHovered ? '#f8fafc' : (e.color || '#475569');
+            ctx.lineWidth = isHovered ? 3 : 2;
+            ctx.stroke();
+
+            // Arrow head
+            const angle = Math.atan2(e.target.y - e.source.y, e.target.x - e.source.x);
+            const midX = (e.source.x + e.target.x) / 2;
+            const midY = (e.source.y + e.target.y) / 2;
+            const headlen = 8;
+            ctx.beginPath();
+            ctx.moveTo(midX, midY);
+            ctx.lineTo(midX - headlen * Math.cos(angle - Math.PI / 6), midY - headlen * Math.sin(angle - Math.PI / 6));
+            ctx.lineTo(midX - headlen * Math.cos(angle + Math.PI / 6), midY - headlen * Math.sin(angle + Math.PI / 6));
+            ctx.fillStyle = isHovered ? '#f8fafc' : (e.color || '#475569');
+            ctx.fill();
+
+            // Edge label
+            if (e.label) {
+                ctx.fillStyle = isHovered ? '#38bdf8' : '#94a3b8';
+                ctx.font = '10px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(e.label, midX, midY - 6);
+            }
+        });
+
+        // Draw Nodes
+        nodesList.forEach(n => {
+            const isHovered = hoveredNode === n;
+
+            // Outer pulse glow for high risk
+            if (n.risk_score >= 0.8) {
+                ctx.beginPath();
+                ctx.arc(n.x, n.y, n.radius + 6, 0, 2 * Math.PI);
+                ctx.fillStyle = `${n.color}22`;
+                ctx.fill();
+            }
+
+            // Node Circle
+            ctx.beginPath();
+            ctx.arc(n.x, n.y, n.radius, 0, 2 * Math.PI);
+            ctx.fillStyle = '#0f172a';
+            ctx.fill();
+            ctx.strokeStyle = isHovered ? '#ffffff' : n.color;
+            ctx.lineWidth = isHovered ? 3 : 2;
+            ctx.stroke();
+
+            // Icon & Name
+            ctx.font = '14px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(n.icon, n.x, n.y);
+
+            // Label below node
+            ctx.font = isHovered ? 'bold 11px sans-serif' : '11px sans-serif';
+            ctx.fillStyle = isHovered ? '#f8fafc' : '#cbd5e1';
+            ctx.textBaseline = 'top';
+            ctx.fillText(n.name, n.x, n.y + n.radius + 5);
+        });
+    }
+
+    renderCanvas();
+
+    // Mouse movement listener for hover effect & tooltip
+    canvas.onmousemove = (evt) => {
+        const rect = canvas.getBoundingClientRect();
+        const mx = evt.clientX - rect.left;
+        const my = evt.clientY - rect.top;
+
+        let found = null;
+        for (const n of nodesList) {
+            const dist = Math.hypot(n.x - mx, n.y - my);
+            if (dist <= n.radius) {
+                found = n;
+                break;
+            }
+        }
+
+        if (found !== hoveredNode) {
+            hoveredNode = found;
+            renderCanvas();
+
+            if (hoveredNode && tooltip) {
+                tooltip.style.display = 'block';
+                tooltip.style.left = `${mx + 15}px`;
+                tooltip.style.top = `${my - 20}px`;
+                tooltip.innerHTML = `
+                    <div style="font-weight:bold; color:${hoveredNode.color}; margin-bottom:2px;">${hoveredNode.icon} ${escapeHtml(hoveredNode.name)}</div>
+                    <div style="color:#94a3b8; font-size:0.7rem;">Type: ${hoveredNode.type}</div>
+                    <div style="color:#f87171; font-size:0.7rem;">Risk Score: ${(hoveredNode.risk_score * 100).toFixed(0)}%</div>
+                `;
+            } else if (tooltip) {
+                tooltip.style.display = 'none';
+            }
+        }
+    };
+
+    canvas.onmouseleave = () => {
+        if (hoveredNode) {
+            hoveredNode = null;
+            renderCanvas();
+        }
+        if (tooltip) tooltip.style.display = 'none';
+    };
 }
 
 function filterRawLogsInspector() {
