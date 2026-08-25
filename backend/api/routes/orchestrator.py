@@ -187,6 +187,7 @@ async def stream_investigation(workflow_id: str):
         last_reports = set()
         last_iteration = 0
         last_status = "unknown"
+        last_sup_step = 0
 
         while True:
             progress = await get_investigation_status(workflow_id)
@@ -203,6 +204,24 @@ async def stream_investigation(workflow_id: str):
                     "phases": progress.get("phases", []),
                 })
             last_status = status
+
+            # Emit events for newly added supervisor thoughts & assessments
+            sup_history = progress.get("supervisor_history", [])
+            while last_sup_step < len(sup_history):
+                step = sup_history[last_sup_step]
+                yield _sse("supervisor_thought", {
+                    "workflow_id": workflow_id,
+                    "iteration": step.get("iteration", last_sup_step) + 1,
+                    "supervisor_assessment": step.get("supervisor_assessment", ""),
+                    "thought": step.get("thought", ""),
+                    "action": step.get("action", ""),
+                    "target_entities": step.get("target_entities", []),
+                    "target_skills": step.get("target_skills", []),
+                    "specific_goal": step.get("specific_goal", ""),
+                    "pivot_entity_detected": step.get("pivot_entity_detected"),
+                    "timestamp": step.get("timestamp", datetime.utcnow().isoformat()),
+                })
+                last_sup_step += 1
 
             current_phase = progress.get("current_phase", 0)
             completed_reports = progress.get("completed_reports", {})

@@ -61,6 +61,10 @@ class PlannerOutput(BaseModel):
 
 class SupervisorDecision(BaseModel):
     """Structured decision emitted by the Autonomous ReAct Investigation Supervisor."""
+    supervisor_assessment: str = Field(
+        default="",
+        description="Explicit evaluation of the previous phase's output quality (success/dead-end/lead), key findings, and current distance/progress toward the ultimate investigation goal"
+    )
     thought: str = Field(description="Step-by-step reasoning about current forensic evidence, gaps, and why this action is optimal")
     action: Literal[
         "gather_evidence",

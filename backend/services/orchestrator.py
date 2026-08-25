@@ -1230,6 +1230,7 @@ class OrchestratorAgent:
             yield sse_event("supervisor_thought", {
                 "run_id": run_id,
                 "iteration": context.iteration + 1,
+                "supervisor_assessment": getattr(decision, "supervisor_assessment", ""),
                 "thought": decision.thought,
                 "action": decision.action,
                 "target_entities": decision.target_entities,

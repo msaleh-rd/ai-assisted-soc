@@ -190,6 +190,7 @@ class SupervisorAgent:
         if not context.entity_graph and context.action_counts.get("gather_evidence", 0) < context.max_action_iterations:
             all_ids = [e.get("id") for e in context.entities if isinstance(e, dict) and e.get("id")]
             return SupervisorDecision(
+                supervisor_assessment="Initial triage completed. Need deep forensic enrichment across seed entities.",
                 thought="No entity graph collected yet. Running evidence collection on all triage entities.",
                 action="gather_evidence",
                 target_entities=all_ids,
@@ -198,6 +199,7 @@ class SupervisorAgent:
         
         if not context.compressed_events and context.action_counts.get("compress_events", 0) < context.max_action_iterations:
             return SupervisorDecision(
+                supervisor_assessment="Evidence collected across entities. Raw telemetry requires 7-stage noise reduction and milestone extraction.",
                 thought="Evidence collected but timeline not compressed yet. Running 7-stage compression pipeline.",
                 action="compress_events",
                 specific_goal="Compress collected raw evidence into high-signal timeline"
@@ -205,12 +207,14 @@ class SupervisorAgent:
             
         if (not context.rca_findings or context.rca_findings.get("confidence_score", 0.0) < 0.70) and context.action_counts.get("perform_rca", 0) < context.max_action_iterations:
             return SupervisorDecision(
+                supervisor_assessment="Compressed attack timeline established. Ready to synthesize root cause and attack phases.",
                 thought="Timeline is ready. Performing Root Cause Analysis and attack chain reconstruction.",
                 action="perform_rca",
                 specific_goal="Reconstruct attack chain and score causal confidence"
             )
             
         return SupervisorDecision(
+            supervisor_assessment="All forensic phases completed or phase quota reached. Proceeding to containment response.",
             thought="Investigation complete or all phases maxed out. Finalizing response plan and containment actions.",
             action="finalize_response",
             specific_goal="Generate prioritized containment and remediation response plan"

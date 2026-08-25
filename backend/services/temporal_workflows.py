@@ -72,6 +72,7 @@ class InvestigationProgress:
     iteration: int = 0
     confidence_history: List[float] = field(default_factory=list)
     messages: List[Dict[str, Any]] = field(default_factory=list)
+    supervisor_history: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # ============================================================
@@ -448,6 +449,7 @@ class InvestigationWorkflow:
                     retry_policy=retry_policy,
                 )
                 context_dict = sup_res["context"]
+                self._progress.supervisor_history = context_dict.get("supervisor_history", [])
                 decision = sup_res["decision"]
                 action = decision.get("action")
 

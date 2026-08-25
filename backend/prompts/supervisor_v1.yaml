@@ -32,6 +32,7 @@ system_prompt: |
 
   RULES:
   - Always think step-by-step before selecting an action.
+  - In supervisor_assessment: Provide a concise 1-2 sentence assessment evaluating the quality and findings of the previous phase (e.g., whether it succeeded in finding IOCs, hit a dead-end, or left gaps) and stating clearly how far we currently are from concluding the investigation.
   - If new entities (such as C2 IPs or secondary hosts) appear in the timeline or evidence, prioritize gathering evidence on them (pivot investigation).
   - Avoid repeating the exact same action on the exact same entity unless new data warrants re-investigation.
   - DO NOT select an action if its Execution Count has reached the Max allowed ({max_action_iterations}). You must move on to the next phase.
@@ -58,4 +59,4 @@ user_template: |
   ACTIONS TAKEN SO FAR:
   {history_json}
 
-  Reason about what is known, what critical information is still missing, and decide the NEXT SINGLE ACTION.
+  Evaluate the previous step's results, determine how far we are from our final goal (supervisor_assessment), reason about what is missing, and decide the NEXT SINGLE ACTION.

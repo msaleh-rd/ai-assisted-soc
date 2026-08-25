@@ -1513,7 +1513,10 @@ function handleOrchEvent(type, data) {
         case 'supervisor_thought':
             const targets = (data.target_entities || []).join(', ') || 'infrastructure';
             const pivotNote = data.pivot_entity_detected ? ` [🎯 Pivot IOC: ${data.pivot_entity_detected}]` : '';
-            addOrchLog('info', 'supervisor', `Step ${data.iteration}/4 Thought: "${data.thought.slice(0, 140)}..." ➔ Action: ${data.action} on [${targets}]${pivotNote}`);
+            if (data.supervisor_assessment) {
+                addOrchLog('info', 'supervisor', `📊 Assessment: ${data.supervisor_assessment}`);
+            }
+            addOrchLog('info', 'supervisor', `Step ${data.iteration} Thought: "${data.thought.slice(0, 140)}..." ➔ Action: ${data.action} on [${targets}]${pivotNote}`);
             break;
 
         case 'agent_start':
