@@ -213,9 +213,22 @@ class SupervisorAgent:
                 specific_goal="Reconstruct attack chain and score causal confidence"
             )
             
+        # Check if investigation goal was achieved vs if quota/exhaustion forced termination
+        rca_conf = (context.rca_findings or {}).get("confidence_score", (context.rca_findings or {}).get("confidence", 0.0))
+        root_cause = (context.rca_findings or {}).get("root_cause", "")
+
+        if rca_conf >= 0.75 and root_cause:
+            assessment = f"Investigation Goal Achieved: Root cause successfully resolved with {int(rca_conf * 100)}% confidence. Proceeding to containment response."
+            thought = f"Root cause analysis concluded with high confidence ({int(rca_conf * 100)}%). Finalizing remediation actions."
+        else:
+            exhausted = [act for act, count in context.action_counts.items() if count >= context.max_action_iterations]
+            exhausted_str = f" ({', '.join(exhausted)} reached {context.max_action_iterations} cap)" if exhausted else ""
+            assessment = f"Phase Quota Reached: Investigation stopping with RCA confidence at {int(rca_conf * 100)}%{exhausted_str}. Proceeding to containment based on available evidence."
+            thought = f"Forensic phase quota reached. Finalizing response plan using currently available evidence."
+
         return SupervisorDecision(
-            supervisor_assessment="All forensic phases completed or phase quota reached. Proceeding to containment response.",
-            thought="Investigation complete or all phases maxed out. Finalizing response plan and containment actions.",
+            supervisor_assessment=assessment,
+            thought=thought,
             action="finalize_response",
             specific_goal="Generate prioritized containment and remediation response plan"
         )
