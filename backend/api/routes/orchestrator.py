@@ -209,17 +209,16 @@ async def stream_investigation(workflow_id: str):
 
             # Emit events for new phase transitions
             if current_phase > last_phase:
-                phase_info = {}
                 phases = progress.get("phases", [])
                 if current_phase <= len(phases):
                     phase_info = phases[current_phase - 1]
-                yield _sse("phase_start", {
-                    "workflow_id": workflow_id,
-                    "phase_num": current_phase,
-                    "parallel": phase_info.get("parallel", False),
-                    "agents": phase_info.get("agents", []),
-                })
-                last_phase = current_phase
+                    yield _sse("phase_start", {
+                        "workflow_id": workflow_id,
+                        "phase_num": current_phase,
+                        "parallel": phase_info.get("parallel", False),
+                        "agents": phase_info.get("agents", []),
+                    })
+                    last_phase = current_phase
                 
             iteration = progress.get("iteration", 0)
             if iteration > last_iteration:

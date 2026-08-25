@@ -1181,11 +1181,10 @@ class OrchestratorAgent:
             "plan_id": f"plan-react-{run_id}",
             "objective": "Autonomous ReAct Investigation Loop",
             "reasoning": "Observation-driven investigation dynamically directed by Supervisor Agent.",
-            "total_phases": context.max_iterations + 2,
-            "total_tasks": context.max_iterations + 2,
+            "total_phases": 1,
+            "total_tasks": 1,
             "phases": [
-                {"phase_num": 1, "parallel": False, "agents": ["triage_agent"], "status": "pending"},
-                {"phase_num": 2, "parallel": False, "agents": ["supervisor_agent"], "status": "pending"},
+                {"phase_num": 1, "parallel": False, "agents": ["triage_agent"], "status": "running"},
             ]
         })
 
@@ -1224,8 +1223,6 @@ class OrchestratorAgent:
         early_terminated_benign = False
 
         while investigation_active and context.iteration < context.max_iterations:
-            current_phase_num += 1
-            
             # Step 1: Supervisor Decision
             decision = await self.supervisor.decide_next_step(context)
             context.record_supervisor_decision(decision.model_dump())
@@ -1258,6 +1255,7 @@ class OrchestratorAgent:
                 break
 
             # Step 2: Execute Chosen Action
+            current_phase_num += 1
             yield sse_event("phase_start", {
                 "run_id": run_id,
                 "phase_num": current_phase_num,

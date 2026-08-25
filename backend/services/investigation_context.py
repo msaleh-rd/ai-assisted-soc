@@ -52,7 +52,9 @@ class InvestigationContext:
     # Adaptive Loop / Communication / ReAct Supervisor state
     messages: List[AgentMessage] = field(default_factory=list)
     iteration: int = 0
-    max_iterations: int = 4
+    max_iterations: int = 15
+    max_action_iterations: int = 3
+    action_counts: Dict[str, int] = field(default_factory=dict)
     confidence_history: List[float] = field(default_factory=list)
     supervisor_history: List[Dict[str, Any]] = field(default_factory=list)
     pivot_entities: List[Dict[str, Any]] = field(default_factory=list)
@@ -78,7 +80,10 @@ class InvestigationContext:
             "timestamp": datetime.utcnow().isoformat() + "Z",
             **decision
         })
-        action_key = f"{decision.get('action')}:{','.join(decision.get('target_entities', []))}"
+        action = decision.get("action")
+        if action:
+            self.action_counts[action] = self.action_counts.get(action, 0) + 1
+        action_key = f"{action}:{','.join(decision.get('target_entities', []))}"
         self.completed_actions.append(action_key)
 
     def post_message(self, msg_type: str, source: str, target: str, payload: Dict[str, Any]) -> None:
@@ -120,8 +125,9 @@ class InvestigationContext:
         )
         
         is_low_confidence = current_confidence > 0 and current_confidence < 0.7
+        has_evidence_capacity = self.action_counts.get("gather_evidence", 0) < self.max_action_iterations
         
-        return has_pending_requests or is_low_confidence
+        return (has_pending_requests or is_low_confidence) and has_evidence_capacity
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize for Temporal payload."""

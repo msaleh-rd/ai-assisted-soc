@@ -102,6 +102,8 @@ class SupervisorAgent:
                 current_confidence=current_confidence,
                 identified_gaps=identified_gaps,
                 history_json=history_json,
+                action_counts_json=json.dumps(context.action_counts, indent=2),
+                max_action_iterations=context.max_action_iterations
             )
 
             prompt = f"{system_prompt}\n\n{user_prompt}"
@@ -175,11 +177,17 @@ class SupervisorAgent:
             decision.action = "perform_rca"
             decision.specific_goal = "Synthesize root cause and attack chain before finalizing response"
 
+        # Enforce per-action limits
+        if context.action_counts.get(decision.action, 0) >= context.max_action_iterations:
+            logger.warning(f"Supervisor chose {decision.action} but it has reached the max limit of {context.max_action_iterations}. Forcing fallback.")
+            decision = self._heuristic_fallback_decision(context)
+
         return decision
 
     def _heuristic_fallback_decision(self, context: InvestigationContext) -> SupervisorDecision:
         """Deterministic fallback decision if the LLM fails or is unavailable."""
-        if not context.entity_graph:
+        # Find next available action
+        if not context.entity_graph and context.action_counts.get("gather_evidence", 0) < context.max_action_iterations:
             all_ids = [e.get("id") for e in context.entities if isinstance(e, dict) and e.get("id")]
             return SupervisorDecision(
                 thought="No entity graph collected yet. Running evidence collection on all triage entities.",
@@ -188,14 +196,14 @@ class SupervisorAgent:
                 specific_goal="Gather baseline evidence for triage entities"
             )
         
-        if not context.compressed_events:
+        if not context.compressed_events and context.action_counts.get("compress_events", 0) < context.max_action_iterations:
             return SupervisorDecision(
                 thought="Evidence collected but timeline not compressed yet. Running 7-stage compression pipeline.",
                 action="compress_events",
                 specific_goal="Compress collected raw evidence into high-signal timeline"
             )
             
-        if not context.rca_findings or context.rca_findings.get("confidence_score", 0.0) < 0.70:
+        if (not context.rca_findings or context.rca_findings.get("confidence_score", 0.0) < 0.70) and context.action_counts.get("perform_rca", 0) < context.max_action_iterations:
             return SupervisorDecision(
                 thought="Timeline is ready. Performing Root Cause Analysis and attack chain reconstruction.",
                 action="perform_rca",
@@ -203,7 +211,7 @@ class SupervisorAgent:
             )
             
         return SupervisorDecision(
-            thought="Investigation complete. Finalizing response plan and containment actions.",
+            thought="Investigation complete or all phases maxed out. Finalizing response plan and containment actions.",
             action="finalize_response",
             specific_goal="Generate prioritized containment and remediation response plan"
         )

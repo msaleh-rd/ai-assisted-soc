@@ -26,7 +26,7 @@ def get_llm(role: str = "default"):
     model_name = MODEL_ROUTING.get(role, DEFAULT_MODEL)
     
     # Fast models for triage, powerful models for RCA/response/supervisor
-    max_tokens = 512 if role == "triage" else 1024
+    max_tokens = 1024 if role == "triage" else 4096
     
     return ChatOpenAI(
         base_url=LM_STUDIO_URL,

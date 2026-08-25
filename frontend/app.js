@@ -1264,6 +1264,10 @@ const AGENT_REGISTRY = {
     'triage': { label: 'Triage & Scope', icon: '🔍', color: '#38bdf8', category: 'Intake' },
     'triage_activity': { label: 'Triage & Scope', icon: '🔍', color: '#38bdf8', category: 'Intake' },
 
+    'supervisor_agent': { label: 'ReAct Supervisor', icon: '🧠', color: '#c084fc', category: 'Supervision' },
+    'supervisor': { label: 'ReAct Supervisor', icon: '🧠', color: '#c084fc', category: 'Supervision' },
+    'supervisor_activity': { label: 'ReAct Supervisor', icon: '🧠', color: '#c084fc', category: 'Supervision' },
+
     'evidence_agent': { label: 'Evidence Collection', icon: '📊', color: '#a78bfa', category: 'Forensics' },
     'gather_evidence': { label: 'Evidence Collection', icon: '📊', color: '#a78bfa', category: 'Forensics' },
     'evidence_activity': { label: 'Evidence Collection', icon: '📊', color: '#a78bfa', category: 'Forensics' },
@@ -1325,9 +1329,14 @@ function renderDynamicDAG(phases) {
 function appendOrUpdateDAGPhase(phaseNum, agents, isParallel = false, initialStatus = 'pending') {
     const dagContainer = document.getElementById('orchDag');
     if (!dagContainer) return;
-    let phaseDiv = document.getElementById(`dagPhase${phaseNum}`);
 
-    const agentList = Array.isArray(agents) && agents.length > 0 ? agents : ['triage_agent'];
+    const agentList = Array.isArray(agents) && agents.length > 0 ? agents : [];
+    if (agentList.length === 0) return;
+
+    let phaseDiv = document.getElementById(`dagPhase${phaseNum}`);
+    const primaryAgentKey = normalizeAgentKey(agentList[0]);
+    const meta = getAgentMeta(primaryAgentKey);
+    const parallelBadge = isParallel ? ' <span class="parallel-badge">PARALLEL</span>' : '';
 
     if (!phaseDiv) {
         if (dagContainer.children.length > 0) {
@@ -1341,9 +1350,6 @@ function appendOrUpdateDAGPhase(phaseNum, agents, isParallel = false, initialSta
         phaseDiv.className = 'dag-phase';
         phaseDiv.id = `dagPhase${phaseNum}`;
 
-        const meta = getAgentMeta(agentList[0]);
-        const parallelBadge = isParallel ? ' <span class="parallel-badge">PARALLEL</span>' : '';
-        
         phaseDiv.innerHTML = `
             <div class="phase-header">
                 <span class="phase-tag">PHASE ${phaseNum}</span>
@@ -1352,13 +1358,20 @@ function appendOrUpdateDAGPhase(phaseNum, agents, isParallel = false, initialSta
             <div class="phase-agents" id="phaseAgents${phaseNum}"></div>
         `;
         dagContainer.appendChild(phaseDiv);
-        activeDagPhases.push(phaseNum);
+        if (!activeDagPhases.includes(phaseNum)) {
+            activeDagPhases.push(phaseNum);
+        }
+    } else {
+        const titleEl = phaseDiv.querySelector('.phase-title');
+        if (titleEl && meta.category) {
+            titleEl.innerHTML = `${meta.category}${parallelBadge}`;
+        }
     }
 
     const agentsDiv = phaseDiv.querySelector(`#phaseAgents${phaseNum}`);
     agentList.forEach((agentName) => {
         const agentKey = normalizeAgentKey(agentName);
-        const meta = getAgentMeta(agentKey);
+        const agentMeta = getAgentMeta(agentKey);
         const nodeId = `node-p${phaseNum}-${agentKey}`;
         
         let nodeDiv = document.getElementById(nodeId);
@@ -1370,14 +1383,14 @@ function appendOrUpdateDAGPhase(phaseNum, agents, isParallel = false, initialSta
             nodeDiv.dataset.phase = phaseNum;
 
             nodeDiv.innerHTML = `
-                <div class="node-glow" style="--node-color: ${meta.color}"></div>
+                <div class="node-glow" style="--node-color: ${agentMeta.color}"></div>
                 <div class="node-main">
-                    <div class="agent-icon-wrapper" style="background: ${meta.color}20; color: ${meta.color}; border: 1px solid ${meta.color}40">
-                        <span class="agent-icon">${meta.icon}</span>
+                    <div class="agent-icon-wrapper" style="background: ${agentMeta.color}20; color: ${agentMeta.color}; border: 1px solid ${agentMeta.color}40">
+                        <span class="agent-icon">${agentMeta.icon}</span>
                     </div>
                     <div class="agent-info">
-                        <div class="agent-label">${meta.label}</div>
-                        <div class="agent-subtext" id="subtext-${nodeId}">Awaiting dispatch</div>
+                        <div class="agent-label">${agentMeta.label}</div>
+                        <div class="agent-subtext" id="subtext-${nodeId}">${initialStatus === 'running' ? 'Executing activity...' : 'Awaiting dispatch'}</div>
                     </div>
                     <div class="agent-status-badge">
                         <span class="status-indicator"></span>
@@ -1386,6 +1399,8 @@ function appendOrUpdateDAGPhase(phaseNum, agents, isParallel = false, initialSta
                 <div class="node-meta-bar" id="meta-${nodeId}" style="display: none;"></div>
             `;
             agentsDiv.appendChild(nodeDiv);
+        } else if (initialStatus) {
+            nodeDiv.className = `agent-node ${initialStatus}`;
         }
     });
 }
@@ -1403,8 +1418,8 @@ function setAgentNodeState(agentName, state, reportData = null) {
         targetNode = matchingNodes[matchingNodes.length - 1];
     }
 
-    if (!targetNode && activeDagPhases.length > 0) {
-        const nextPhase = activeDagPhases.length + 1;
+    if (!targetNode) {
+        const nextPhase = (activeDagPhases.length || 0) + 1;
         appendOrUpdateDAGPhase(nextPhase, [agentName], false, state);
         targetNode = document.getElementById(`node-p${nextPhase}-${key}`);
     }

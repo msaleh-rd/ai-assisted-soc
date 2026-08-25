@@ -440,9 +440,6 @@ class InvestigationWorkflow:
             early_terminated_benign = False
 
             while investigation_active and context.iteration < context.max_iterations:
-                current_phase += 1
-                self._progress.current_phase = current_phase
-
                 # Step 1: Supervisor Decision
                 sup_res = await workflow.execute_activity(
                     "supervisor_activity",
@@ -475,6 +472,8 @@ class InvestigationWorkflow:
                     act_name, task_prefix = activity_map[action]
                     task_id = f"{task_prefix}-iter{context.iteration + 1}"
                     
+                    current_phase += 1
+                    self._progress.current_phase = current_phase
                     self._progress.phases.append({
                         "phase_num": current_phase,
                         "parallel": False,

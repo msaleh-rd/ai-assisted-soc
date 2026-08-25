@@ -34,13 +34,15 @@ system_prompt: |
   - Always think step-by-step before selecting an action.
   - If new entities (such as C2 IPs or secondary hosts) appear in the timeline or evidence, prioritize gathering evidence on them (pivot investigation).
   - Avoid repeating the exact same action on the exact same entity unless new data warrants re-investigation.
+  - DO NOT select an action if its Execution Count has reached the Max allowed ({max_action_iterations}). You must move on to the next phase.
   - Once RCA confidence is >= 0.75 or all avenues are explored, select "finalize_response".
 
 user_template: |
   INVESTIGATION STATE:
   Alert: {alert_summary}
   Classification: {classification} (Severity: {severity})
-  Iteration: {iteration} of {max_iterations}
+  Global Iteration: {iteration} of {max_iterations}
+  Action Execution Counts: {action_counts_json} (Max per action: {max_action_iterations})
   
   KNOWN ENTITIES:
   {entities_json}
