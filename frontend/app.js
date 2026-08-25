@@ -2559,7 +2559,8 @@ function renderCompressionInspectorView(report, tabs, body) {
     tabs.innerHTML = `
         <button class="phase-tab-btn active" id="phaseTabBtn-funnel" onclick="switchPhaseModalTab('funnel')">🗜️ 7-Stage Funnel Breakdown</button>
         <button class="phase-tab-btn" id="phaseTabBtn-rawlogs" onclick="switchPhaseModalTab('rawlogs')">📥 Raw Ingested Logs (${origCount})</button>
-        <button class="phase-tab-btn" id="phaseTabBtn-milestones" onclick="switchPhaseModalTab('milestones')">📤 Compressed Milestones (${timelineCount})</button>
+        <button class="phase-tab-btn" id="phaseTabBtn-filtered" onclick="switchPhaseModalTab('filtered')">🛡️ Filtered Security Events (${compCount})</button>
+        <button class="phase-tab-btn" id="phaseTabBtn-milestones" onclick="switchPhaseModalTab('milestones')">📤 Synthesized Milestones (${timelineCount})</button>
         <button class="phase-tab-btn" id="phaseTabBtn-subgraph" onclick="switchPhaseModalTab('subgraph')">🕸️ Interactive Attack Graph</button>
     `;
 
@@ -2572,7 +2573,7 @@ function renderCompressionInspectorView(report, tabs, body) {
                 <span class="phase-kpi-sub">Across Auditd, Suricata, Auth, Wazuh</span>
             </div>
             <div class="phase-kpi-card">
-                <span class="phase-kpi-label">Compressed Milestones</span>
+                <span class="phase-kpi-label">Filtered High-Risk Events</span>
                 <span class="phase-kpi-val" style="color: #34d399;">${compCount}</span>
                 <span class="phase-kpi-sub">${timelineCount} synthesized timeline steps</span>
             </div>
@@ -2631,6 +2632,28 @@ function renderCompressionInspectorView(report, tabs, body) {
                 <td>${srcPill}</td>
                 <td><strong style="color:#e2e8f0;">${escapeHtml(log.entity || '')}</strong></td>
                 <td style="color:#cbd5e1;">${escapeHtml(log.action || log.event_type || '')}</td>
+                <td><span class="risk-pill ${riskClass}">${risk}</span></td>
+            </tr>
+        `;
+    });
+
+    // Filtered Events (150 High-Risk Retained Events)
+    const filteredEvents = findings.filtered_events || [];
+    let filteredEventRows = '';
+    filteredEvents.forEach((ev, i) => {
+        const risk = ev.risk_score !== undefined ? ev.risk_score : 0.5;
+        const riskClass = risk >= 0.8 ? 'risk-high' : risk >= 0.5 ? 'risk-med' : 'risk-low';
+        const mitre = ev.mitre_technique_id ? `<span class="mitre-badge">${ev.mitre_technique_id} - ${escapeHtml(ev.mitre_technique_name || ev.mitre_tactic || '')}</span>` : '<span style="color:#64748b; font-size:0.75rem;">—</span>';
+        const rawCountBadge = ev.raw_count > 1 ? `<span class="badge" style="background:#1e293b; color:#38bdf8; font-size:0.72rem;">${ev.raw_count} raw logs</span>` : `<span style="color:#64748b; font-size:0.75rem;">1 log</span>`;
+
+        filteredEventRows += `
+            <tr class="filtered-event-row">
+                <td style="color:#64748b; width:40px;">${i + 1}</td>
+                <td style="color:#94a3b8; white-space:nowrap; font-family:var(--mono); font-size:0.8rem;">${escapeHtml(ev.timestamp || '')}</td>
+                <td><strong style="color:#e2e8f0;">${escapeHtml(ev.entity || '')}</strong></td>
+                <td style="color:#cbd5e1;">${escapeHtml(ev.action || ev.event_type || '')}</td>
+                <td>${mitre}</td>
+                <td>${rawCountBadge}</td>
                 <td><span class="risk-pill ${riskClass}">${risk}</span></td>
             </tr>
         `;
@@ -2731,15 +2754,40 @@ function renderCompressionInspectorView(report, tabs, body) {
             </div>
         </div>
 
-        <!-- Tab 3: Milestones -->
+        <!-- Tab 3: Filtered Security Events (150) -->
+        <div class="phase-modal-tab-pane" id="phaseTabPane-filtered" style="display: none;">
+            <div class="log-viewer-search-bar">
+                <input type="text" class="log-search-input" id="filteredLogSearchInput" placeholder="🔍 Search by entity, action, MITRE tactic, or risk..." oninput="filterFilteredEventsInspector()">
+            </div>
+            <div class="log-table-container">
+                <table class="log-table">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Timestamp</th>
+                            <th>Entity / Host</th>
+                            <th>Action / Syscall</th>
+                            <th>MITRE ATT&CK</th>
+                            <th>Rollup Count</th>
+                            <th>Risk</th>
+                        </tr>
+                    </thead>
+                    <tbody id="filteredLogTableBody">
+                        ${filteredEventRows || '<tr><td colspan="7" style="text-align:center; padding:30px; color:#64748b;">No filtered events recorded</td></tr>'}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Tab 4: Milestones -->
         <div class="phase-modal-tab-pane" id="phaseTabPane-milestones" style="display: none;">
-            <h3 style="margin-bottom:12px; font-size:1rem; color:#f8fafc;">High-Signal Attack Milestones (${timelineCount})</h3>
+            <h3 style="margin-bottom:12px; font-size:1rem; color:#f8fafc;">Synthesized Attack Milestones (${timelineCount})</h3>
             <div style="max-height: 520px; overflow-y: auto;">
                 ${milestonesHtml || '<div style="color:#64748b; text-align:center; padding:30px;">No milestones generated</div>'}
             </div>
         </div>
 
-        <!-- Tab 4: Subgraph -->
+        <!-- Tab 5: Subgraph -->
         <div class="phase-modal-tab-pane" id="phaseTabPane-subgraph" style="display: none;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
                 <h3 style="margin:0; font-size:1rem; color:#f8fafc;">Interactive Causal Attack Graph</h3>
@@ -2748,6 +2796,19 @@ function renderCompressionInspectorView(report, tabs, body) {
 
             <div class="subgraph-canvas-container" id="subgraphCanvasContainer">
                 <canvas id="compressionSubgraphCanvas"></canvas>
+                <div id="subgraphCanvasTooltip" class="subgraph-canvas-tooltip"></div>
+                <div class="subgraph-canvas-legend">
+                    <span><span style="color:#ef4444; font-weight:bold;">●</span> Malicious File / Ransomware</span>
+                    <span><span style="color:#38bdf8; font-weight:bold;">●</span> Threat Actor / Remote C2</span>
+                    <span><span style="color:#a78bfa; font-weight:bold;">●</span> Compromised Host / Network</span>
+                    <span><span style="color:#10b981; font-weight:bold;">●</span> SIEM / Monitoring Service</span>
+                </div>
+            </div>
+
+            <h4 style="margin-top:16px; margin-bottom:10px; font-size:0.85rem; color:#94a3b8; text-transform:uppercase; letter-spacing:0.05em;">Categorized Attack Subgraph Elements</h4>
+            ${subgraphHtml}
+        </div>
+    `;
                 <div id="subgraphCanvasTooltip" class="subgraph-canvas-tooltip"></div>
                 <div class="subgraph-canvas-legend">
                     <span><span style="color:#ef4444; font-weight:bold;">●</span> Malicious File / Ransomware</span>
@@ -3021,6 +3082,15 @@ function filterRawLogsInspector() {
         const matchesSrc = srcFilter === 'all' || rowSrc.includes(srcFilter);
 
         row.style.display = matchesQuery && matchesSrc ? '' : 'none';
+    });
+}
+
+function filterFilteredEventsInspector() {
+    const q = (document.getElementById('filteredLogSearchInput')?.value || '').toLowerCase();
+
+    document.querySelectorAll('.filtered-event-row').forEach(row => {
+        const text = row.innerText.toLowerCase();
+        row.style.display = !q || text.includes(q) ? '' : 'none';
     });
 }
 

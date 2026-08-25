@@ -635,6 +635,24 @@ class CompressionAgent(BaseAgent):
             except Exception as e:
                 logger.error(f"Failed to generate semantic timeline: {e}")
 
+        # Prepare lightweight serialized list of the filtered events (150 events)
+        filtered_events_summary = []
+        for ev in (package.events or []):
+            item = {
+                "event_id": ev.event_id,
+                "timestamp": ev.timestamp.isoformat() if hasattr(ev.timestamp, "isoformat") else str(ev.timestamp),
+                "event_type": ev.event_type,
+                "entity": ev.entity_id,
+                "action": str(ev.action),
+                "risk_score": round(float(ev.risk_score), 2),
+                "raw_count": len(ev.raw_events) if ev.raw_events else 1,
+            }
+            if ev.mitre_technique:
+                item["mitre_tactic"] = ev.mitre_technique.tactic_name
+                item["mitre_technique_id"] = ev.mitre_technique.technique_id
+                item["mitre_technique_name"] = ev.mitre_technique.technique_name
+            filtered_events_summary.append(item)
+
         # Save to context
         context.compressed_events = {
             "original_events": original_count,
@@ -646,7 +664,8 @@ class CompressionAgent(BaseAgent):
             "risk_score": package.risk_score,
             "confidence": package.confidence,
             "stages": stages,
-            "skills_used": selected_skills
+            "skills_used": selected_skills,
+            "filtered_events": filtered_events_summary,
         }
 
         return AgentReport(
@@ -666,6 +685,7 @@ class CompressionAgent(BaseAgent):
                 "skills_used": selected_skills,
                 "stages": stages,
                 "raw_events": raw_events[:100],
+                "filtered_events": filtered_events_summary,
                 "timeline": final_timeline,
                 "attack_graph": package.attack_graph,
                 "summary": f"Compressed {original_count} events down to {compressed_count} ({ratio:.1f}x reduction) through {len(selected_skills)} agentic compression skills.",
