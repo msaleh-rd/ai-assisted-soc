@@ -1300,7 +1300,29 @@ const AGENT_REGISTRY = {
 
 function normalizeAgentKey(name) {
     if (!name) return 'triage_agent';
-    return String(name).toLowerCase().replace(/['"]/g, '').trim();
+    const clean = String(name).toLowerCase().replace(/['"]/g, '').trim();
+    const aliasMap = {
+        'compress_events': 'compression_agent',
+        'compression_activity': 'compression_agent',
+        'compression': 'compression_agent',
+        'gather_evidence': 'evidence_agent',
+        'evidence_activity': 'evidence_agent',
+        'evidence': 'evidence_agent',
+        'perform_rca': 'rca_agent',
+        'rca_activity': 'rca_agent',
+        'rca': 'rca_agent',
+        'discover_network': 'discovery_agent',
+        'discovery_activity': 'discovery_agent',
+        'discovery': 'discovery_agent',
+        'finalize_response': 'response_agent',
+        'response_activity': 'response_agent',
+        'response': 'response_agent',
+        'triage_activity': 'triage_agent',
+        'triage': 'triage_agent',
+        'supervisor_activity': 'supervisor_agent',
+        'supervisor': 'supervisor_agent'
+    };
+    return aliasMap[clean] || clean;
 }
 
 function getAgentMeta(name) {
@@ -1663,10 +1685,11 @@ function renderSynthesis(synthesis, totalMs) {
 }
 
 function formatAgentName(name) {
+    const key = normalizeAgentKey(name);
     const names = {
         orchestrator: '🎯 Orchestrator',
-        supervisor: '🧠 Supervisor',
         supervisor_agent: '🧠 Supervisor',
+        supervisor: '🧠 Supervisor',
         triage_agent: '🔍 Triage',
         evidence_agent: '📊 Evidence',
         discovery_agent: '🌐 Discovery',
@@ -1674,7 +1697,7 @@ function formatAgentName(name) {
         rca_agent: '🔬 RCA',
         response_agent: '⚡ Response',
     };
-    return names[name] || name;
+    return names[key] || getAgentMeta(key)?.label || name;
 }
 
 function getAgentLogSummary(report) {

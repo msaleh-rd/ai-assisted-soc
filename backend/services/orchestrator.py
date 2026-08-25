@@ -1260,18 +1260,24 @@ class OrchestratorAgent:
 
             # Step 2: Execute Chosen Action
             current_phase_num += 1
+            action_to_agent = {
+                "gather_evidence": "evidence_agent",
+                "discover_network": "discovery_agent",
+                "compress_events": "compression_agent",
+                "perform_rca": "rca_agent",
+            }
+            canonical_agent_name = action_to_agent.get(decision.action, decision.action)
             yield sse_event("phase_start", {
                 "run_id": run_id,
                 "phase_num": current_phase_num,
                 "parallel": False,
-                "agents": [decision.action]
+                "agents": [canonical_agent_name]
             })
-
             task_id = f"task-{decision.action}-iter{context.iteration + 1}"
             yield sse_event("agent_start", {
                 "run_id": run_id,
                 "phase_num": current_phase_num,
-                "agent_name": decision.action,
+                "agent_name": canonical_agent_name,
                 "task_id": task_id,
                 "description": decision.specific_goal,
                 "parallel": False,
@@ -1295,7 +1301,7 @@ class OrchestratorAgent:
                 yield sse_event("agent_complete", {
                     "run_id": run_id,
                     "phase_num": current_phase_num,
-                    "agent_name": decision.action,
+                    "agent_name": step_report.agent_name or canonical_agent_name,
                     "task_id": task_id,
                     "report": step_report.to_dict()
                 })

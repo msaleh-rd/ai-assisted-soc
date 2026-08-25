@@ -464,14 +464,14 @@ class InvestigationWorkflow:
 
                 # Step 2: Execute Chosen Action Activity
                 activity_map = {
-                    "gather_evidence": ("evidence_activity", "task-evidence"),
-                    "discover_network": ("discovery_activity", "task-discovery"),
-                    "compress_events": ("compression_activity", "task-compression"),
-                    "perform_rca": ("rca_activity", "task-rca"),
+                    "gather_evidence": ("evidence_activity", "task-evidence", "evidence_agent"),
+                    "discover_network": ("discovery_activity", "task-discovery", "discovery_agent"),
+                    "compress_events": ("compression_activity", "task-compression", "compression_agent"),
+                    "perform_rca": ("rca_activity", "task-rca", "rca_agent"),
                 }
 
                 if action in activity_map:
-                    act_name, task_prefix = activity_map[action]
+                    act_name, task_prefix, canonical_agent = activity_map[action]
                     task_id = f"{task_prefix}-iter{context.iteration + 1}"
                     
                     current_phase += 1
@@ -479,7 +479,7 @@ class InvestigationWorkflow:
                     self._progress.phases.append({
                         "phase_num": current_phase,
                         "parallel": False,
-                        "agents": [action],
+                        "agents": [canonical_agent],
                         "status": "running"
                     })
 
