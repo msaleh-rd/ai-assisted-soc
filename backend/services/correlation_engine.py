@@ -624,8 +624,9 @@ class RiskScorer:
         # Filter low-risk events
         high_risk_events = [e for e in events if e.risk_score > 0.3]
         if not high_risk_events and events:
-            # If no event exceeded 0.3 threshold, keep top risk events
-            high_risk_events = sorted(events, key=lambda e: e.risk_score, reverse=True)[:max(5, len(events))]
+            # If no event exceeded 0.3 threshold, keep top risk events (top 20% or minimum 5)
+            top_k = min(max(5, int(len(events) * 0.2)), len(events))
+            high_risk_events = sorted(events, key=lambda e: e.risk_score, reverse=True)[:top_k]
         
         return high_risk_events
     
@@ -649,8 +650,8 @@ class CorrelationEngine:
     Orchestrates all 7 stages of compression.
     """
     
-    def __init__(self):
-        self.temporal_filter = TemporalFilter()
+    def __init__(self, time_window_minutes: int = 60):
+        self.temporal_filter = TemporalFilter(time_window_minutes)
         self.entity_correlator = EntityCorrelator()
         self.behavioral_filter = BehavioralFilter()
         self.deduplicator = EventDeduplicator()
@@ -658,22 +659,17 @@ class CorrelationEngine:
         self.abstraction_engine = AbstractionEngine()
         self.risk_scorer = RiskScorer()
     
-    async def compress_events(self, 
-                             raw_events: List[Dict],
-                             incident_time: datetime,
-                             investigation_id: str) -> CompressedPackage:
-        """Compress events through all 7 stages.
+    def compress_events(self, 
+                        events: List[CorrelatedEvent],
+                        investigation_id: str) -> CompressedPackage:
+        """Execute 7-stage compression pipeline."""
         
-        Returns investigation package ready for RCA.
-        """
-        
-        original_count = len(raw_events)
-        events = raw_events
+        original_count = len(events)
         stage_metrics: List[StageMetrics] = []
         
         # Stage 1: Temporal Filter
         count_before = len(events)
-        events, reduction = self.temporal_filter.filter_events(events, incident_time)
+        events, reduction = self.temporal_filter.filter_by_time_window(events)
         count_after = len(events)
         stage_metrics.append(StageMetrics(
             name="Temporal Filter", input_count=count_before, output_count=count_after,
@@ -710,23 +706,28 @@ class CorrelationEngine:
         # Stage 5: Graph Analysis
         count_before = len(deduped_events)
         patterns, reduction = self.graph_analyzer.analyze_relationships(deduped_events)
-        # Graph analysis finds patterns but doesn't reduce the event list itself
+        # Filter down to events connected to attack graph patterns or elevated risk
+        graph_events = [e for e in deduped_events if e.risk_score >= 0.4 or any(e.entity_id in str(p) for p in patterns)]
+        if not graph_events:
+            graph_events = deduped_events
+        count_after = len(graph_events)
+        graph_reduction = (1.0 - count_after / max(count_before, 1)) if count_before else 0.0
         stage_metrics.append(StageMetrics(
-            name="Graph Analysis", input_count=count_before, output_count=count_before,
-            reduction_pct=0.0, skill="entity-graph-reduction"
+            name="Graph Analysis", input_count=count_before, output_count=count_after,
+            reduction_pct=round(graph_reduction * 100, 1), skill="entity-graph-reduction"
         ))
         
         # Stage 6: Abstraction
-        abstractions = self.abstraction_engine.abstract_events(deduped_events)
+        abstractions = self.abstraction_engine.abstract_events(graph_events)
         stage_metrics.append(StageMetrics(
-            name="Abstraction", input_count=len(deduped_events), output_count=len(abstractions),
-            reduction_pct=round((1.0 - len(abstractions) / max(len(deduped_events), 1)) * 100, 1),
+            name="Abstraction", input_count=len(graph_events), output_count=len(abstractions),
+            reduction_pct=round((1.0 - len(abstractions) / max(len(graph_events), 1)) * 100, 1),
             skill="semantic-summarizer"
         ))
         
         # Stage 7: Risk Scoring
-        count_before = len(deduped_events)
-        high_risk_events = self.risk_scorer.score_risks(deduped_events, patterns)
+        count_before = len(graph_events)
+        high_risk_events = self.risk_scorer.score_risks(graph_events, patterns)
         count_after = len(high_risk_events)
         stage_metrics.append(StageMetrics(
             name="Risk Scoring", input_count=count_before, output_count=count_after,
