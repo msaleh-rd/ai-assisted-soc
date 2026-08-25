@@ -615,6 +615,9 @@ class CompressionAgent(BaseAgent):
                     entity: str = Field(..., description="Entity involved")
                     action: str = Field(..., description="Detailed description of the action")
                     risk_score: float = Field(..., description="Risk score (0.0-1.0)")
+                    mitre_tactic: Optional[str] = Field(None, description="MITRE ATT&CK Tactic Name")
+                    mitre_technique_id: Optional[str] = Field(None, description="MITRE ATT&CK Technique ID")
+                    mitre_technique_name: Optional[str] = Field(None, description="MITRE ATT&CK Technique Name")
                 
                 class SemanticTimeline(BaseModel):
                     timeline: list[TimelineEvent] = Field(..., description="Chronological semantic timeline")

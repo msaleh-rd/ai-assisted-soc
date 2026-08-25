@@ -20,6 +20,7 @@ import asyncio
 from collections import defaultdict
 import numpy as np
 from abc import ABC, abstractmethod
+from backend.services.mitre_mapper import MitreTechnique, mitre_mapper
 
 
 class AttackType(Enum):
@@ -47,6 +48,7 @@ class CorrelatedEvent:
     confidence: float = 1.0
     risk_score: float = 0.0
     compression_ratio: float = 1.0
+    mitre_technique: Optional[MitreTechnique] = None
 
 
 @dataclass
@@ -284,6 +286,10 @@ class EntityCorrelator:
             risk_score=max_risk
         )
         
+        mitre_tech = mitre_mapper.classify_event(action, metadata=first_event)
+        if mitre_tech:
+            corr_event.mitre_technique = mitre_tech
+            
         return corr_event
     
     @staticmethod
@@ -759,13 +765,19 @@ class CorrelationEngine:
                 cis_events.append(event)
                 continue
                 
-            timeline.append({
+            event_dict = {
                 'timestamp': event.timestamp.isoformat(),
                 'event_type': event.event_type,
                 'entity': event.entity_id,
                 'action': event.action,
                 'risk_score': event.risk_score
-            })
+            }
+            if event.mitre_technique:
+                event_dict['mitre_tactic'] = event.mitre_technique.tactic_name
+                event_dict['mitre_technique_id'] = event.mitre_technique.technique_id
+                event_dict['mitre_technique_name'] = event.mitre_technique.technique_name
+                
+            timeline.append(event_dict)
             
         if cis_events:
             # Roll up all CIS/Compliance events into a single milestone
