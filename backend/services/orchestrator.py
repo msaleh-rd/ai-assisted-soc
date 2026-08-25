@@ -665,7 +665,7 @@ class CompressionAgent(BaseAgent):
                 "timeline_milestones": len(package.timeline),
                 "skills_used": selected_skills,
                 "stages": stages,
-                "raw_events": raw_events,
+                "raw_events": raw_events[:100],
                 "timeline": final_timeline,
                 "attack_graph": package.attack_graph,
                 "summary": f"Compressed {original_count} events down to {compressed_count} ({ratio:.1f}x reduction) through {len(selected_skills)} agentic compression skills.",

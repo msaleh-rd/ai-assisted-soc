@@ -1220,19 +1220,28 @@ async function runOrchestration() {
             if (done) break;
 
             buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop(); // Keep incomplete line in buffer
+            const blocks = buffer.split('\n\n');
+            buffer = blocks.pop(); // Keep incomplete block in buffer
 
-            let eventType = '';
-            for (const line of lines) {
-                if (line.startsWith('event: ')) {
-                    eventType = line.slice(7).trim();
-                } else if (line.startsWith('data: ') && eventType) {
+            for (const block of blocks) {
+                if (!block.trim()) continue;
+                let eventType = '';
+                let dataStr = '';
+                const lines = block.split('\n');
+                for (const line of lines) {
+                    if (line.startsWith('event: ')) {
+                        eventType = line.slice(7).trim();
+                    } else if (line.startsWith('data: ')) {
+                        dataStr += (dataStr ? '\n' : '') + line.slice(6);
+                    }
+                }
+                if (eventType && dataStr) {
                     try {
-                        const data = JSON.parse(line.slice(6));
+                        const data = JSON.parse(dataStr);
                         handleOrchEvent(eventType, data);
-                    } catch (e) { /* skip malformed */ }
-                    eventType = '';
+                    } catch (e) {
+                        console.error('SSE JSON parse error:', e, 'Payload snippet:', dataStr.slice(0, 150));
+                    }
                 }
             }
         }
