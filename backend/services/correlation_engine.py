@@ -77,6 +77,10 @@ class CompressedPackage:
     created_at: datetime
     stage_metrics: List[StageMetrics] = field(default_factory=list)
 
+    @property
+    def raw_event_count(self) -> int:
+        return self.original_event_count
+
 
 class TemporalFilter:
     """Stage 1: Filter events by temporal coherence.
@@ -650,8 +654,8 @@ class CorrelationEngine:
     Orchestrates all 7 stages of compression.
     """
     
-    def __init__(self, time_window_minutes: int = 60):
-        self.temporal_filter = TemporalFilter(time_window_minutes)
+    def __init__(self, time_window_minutes: int = 60, window_hours: int = 24):
+        self.temporal_filter = TemporalFilter(window_hours=window_hours)
         self.entity_correlator = EntityCorrelator()
         self.behavioral_filter = BehavioralFilter()
         self.deduplicator = EventDeduplicator()
@@ -659,26 +663,47 @@ class CorrelationEngine:
         self.abstraction_engine = AbstractionEngine()
         self.risk_scorer = RiskScorer()
     
-    def compress_events(self, 
-                        events: List[CorrelatedEvent],
-                        investigation_id: str) -> CompressedPackage:
+    async def compress_events(self, 
+                             raw_events: Optional[List[Any]] = None,
+                             incident_time: Optional[datetime] = None,
+                             investigation_id: str = "inv-unknown",
+                             events: Optional[List[Any]] = None,
+                             window_minutes: Optional[int] = None,
+                             **kwargs) -> CompressedPackage:
         """Execute 7-stage compression pipeline."""
         
-        original_count = len(events)
+        input_list = raw_events if raw_events is not None else (events or [])
+        original_count = len(input_list)
+        if incident_time is None:
+            incident_time = datetime.utcnow()
+            
         stage_metrics: List[StageMetrics] = []
         
         # Stage 1: Temporal Filter
-        count_before = len(events)
-        events, reduction = self.temporal_filter.filter_by_time_window(events)
-        count_after = len(events)
+        count_before = len(input_list)
+        if input_list and isinstance(input_list[0], CorrelatedEvent):
+            dict_events = [{
+                "event_id": e.event_id,
+                "timestamp": e.timestamp.isoformat() if isinstance(e.timestamp, datetime) else str(e.timestamp),
+                "event_type": e.event_type,
+                "entity": e.entity_id,
+                "action": e.action,
+                "risk_score": e.risk_score,
+                "raw_events": e.raw_events,
+            } for e in input_list]
+        else:
+            dict_events = input_list
+            
+        temporal_events, reduction = self.temporal_filter.filter_events(dict_events, incident_time)
+        count_after = len(temporal_events)
         stage_metrics.append(StageMetrics(
             name="Temporal Filter", input_count=count_before, output_count=count_after,
             reduction_pct=round(reduction * 100, 1), skill="temporal-clustering"
         ))
         
         # Stage 2: Entity Correlation
-        count_before = len(events)
-        correlated_events, reduction = self.entity_correlator.correlate_events(events)
+        count_before = len(temporal_events)
+        correlated_events, reduction = self.entity_correlator.correlate_events(temporal_events)
         count_after = len(correlated_events)
         stage_metrics.append(StageMetrics(
             name="Entity Correlation", input_count=count_before, output_count=count_after,
@@ -740,7 +765,7 @@ class CorrelationEngine:
             investigation_id=investigation_id,
             original_event_count=original_count,
             compressed_event_count=len(high_risk_events),
-            compression_ratio=original_count / len(high_risk_events) if high_risk_events else 1,
+            compression_ratio=original_count / len(high_risk_events) if high_risk_events else 1.0,
             events=high_risk_events,
             timeline=self._build_timeline(high_risk_events),
             attack_graph=self._build_attack_graph(patterns),
