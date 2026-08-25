@@ -159,6 +159,10 @@ class TriageAgent(BaseAgent):
             context.entities = findings.get("entities_identified", [])
             context.classification = findings.get("classification", "unknown")
             context.severity = findings.get("severity", "unknown")
+            if findings.get("tactic"):
+                context.mitre_tactics = [findings["tactic"]]
+            if findings.get("technique"):
+                context.mitre_techniques = [findings["technique"]]
         except Exception as e:
             # Fallback if LLM fails
             findings = {"error": str(e), "requires_immediate_action": True, "severity": "High", "skills_used": ["ioc-extractor", "severity-evaluator"]}
@@ -852,6 +856,21 @@ class RCAAnalystAgent(BaseAgent):
                             payload={"reason": "Missing origin of lateral movement"}
                         )
             
+            # Extract IOCs from entity graph & timeline
+            iocs = []
+            for eid, edata in entity_graph.items():
+                etype = edata.get("type", "").lower()
+                erisk = edata.get("risk_score", 0.0)
+                if erisk >= 0.6 or etype in ("ip", "file", "domain", "hash", "ip_address"):
+                    iocs.append({
+                        "type": etype or "ioc",
+                        "value": eid,
+                        "risk_score": erisk,
+                        "reputation": edata.get("threat_intel", {}).get("reputation", "suspicious"),
+                    })
+            findings["indicators_of_compromise"] = iocs
+            context.iocs = iocs
+            
             context.rca_findings = findings
             context.rca_findings["confidence_score"] = confidence
             
@@ -956,7 +975,7 @@ class ResponsePlannerAgent(BaseAgent):
                         target="rca_agent",
                         payload={"reason": "Cannot generate safe response plan based on very low confidence RCA."}
                     )
-            confidence = 0.90
+            confidence = findings.get("confidence", 0.90) if findings.get("confidence") is not None else 0.90
         except Exception as e:
             findings = {"error": str(e), "actions_recommended": [], "critical_actions": 0, "summary": str(e)}
             confidence = 0.0

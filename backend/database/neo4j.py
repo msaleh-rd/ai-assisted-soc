@@ -1,7 +1,11 @@
 """Neo4j graph database integration."""
 
 from typing import Optional, List, Dict, Any
-from neo4j import AsyncDriver, AsyncSession
+try:
+    from neo4j import AsyncDriver, AsyncSession
+except ImportError:
+    AsyncDriver = None
+    AsyncSession = None
 
 
 class Neo4jClient:
