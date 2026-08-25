@@ -931,6 +931,34 @@
         </div>
     </main>
 
-    <script src="/static/app.js?v=5"></script>
+    <!-- Phase Inspector Modal (Detailed Phase Audit & Raw Logs Viewer) -->
+    <div id="phaseInspectorModal" class="phase-modal" style="display: none;">
+        <div class="phase-modal-backdrop" onclick="closePhaseInspector()"></div>
+        <div class="phase-modal-dialog">
+            <div class="phase-modal-header">
+                <div class="phase-modal-title-group">
+                    <span id="phaseModalBadge" class="badge">Phase Audit</span>
+                    <h2 id="phaseModalTitle" style="margin: 0; font-size: 1.25rem;">Phase Inspector</h2>
+                    <span id="phaseModalAgentTag" class="phase-agent-tag">agent_name</span>
+                </div>
+                <div class="phase-modal-header-actions">
+                    <span id="phaseModalDuration" class="phase-modal-duration">--ms</span>
+                    <button class="btn btn-sm btn-secondary phase-modal-close" onclick="closePhaseInspector()" title="Close">&times;</button>
+                </div>
+            </div>
+            
+            <!-- Dynamic Navigation Tabs -->
+            <div id="phaseModalTabs" class="phase-modal-tabs">
+                <!-- Injected tabs -->
+            </div>
+
+            <!-- Tab Contents Container -->
+            <div id="phaseModalBody" class="phase-modal-body">
+                <!-- Injected tab content views -->
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js?v=6"></script>
 </body>
 </html>

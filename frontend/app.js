@@ -1435,6 +1435,10 @@ function setAgentNodeState(agentName, state, reportData = null) {
             const dur = reportData && reportData.duration_ms ? `${reportData.duration_ms}ms` : 'Completed';
             if (subtextEl) subtextEl.textContent = `✓ ${dur}`;
             
+            targetNode.style.cursor = 'pointer';
+            targetNode.title = `Click to inspect forensic artifacts for ${formatAgentName(key)}`;
+            targetNode.onclick = () => openPhaseInspector(key);
+
             if (metaEl && reportData && reportData.findings) {
                 metaEl.style.display = 'flex';
                 let metaHtml = '';
@@ -1576,6 +1580,11 @@ function addOrchLog(eventType, agent, message) {
 }
 
 function addAgentReport(report) {
+    window.currentPhaseReports = window.currentPhaseReports || {};
+    const agentKey = normalizeAgentKey(report.agent_name || '');
+    window.currentPhaseReports[agentKey] = report;
+    if (report.task_id) window.currentPhaseReports[report.task_id] = report;
+
     const grid = document.getElementById('orchReportsGrid');
     const confidence = report.confidence || 0;
     const confClass = confidence >= 0.8 ? 'confidence-high' : confidence >= 0.5 ? 'confidence-medium' : 'confidence-low';
@@ -1584,7 +1593,7 @@ function addAgentReport(report) {
     const findings = report.findings || {};
     const displayFindings = Object.entries(findings)
         .filter(([k, v]) => typeof v !== 'object' || Array.isArray(v))
-        .filter(([k]) => k !== 'summary' && k !== 'initial_assessment')
+        .filter(([k]) => k !== 'summary' && k !== 'initial_assessment' && k !== 'raw_events' && k !== 'timeline' && k !== 'entity_graph')
         .slice(0, 6);
 
     const artifactsHtml = (report.artifacts || [])
@@ -1607,6 +1616,7 @@ function addAgentReport(report) {
         <span class="report-confidence ${confClass}">${(confidence * 100).toFixed(0)}% confidence</span>
         <div class="report-findings">${findingsHtml}</div>
         <div class="report-artifacts">${artifactsHtml}</div>
+        <button class="inspect-phase-btn" onclick="openPhaseInspector('${agentKey}')">🔍 Inspect Artifacts & Telemetry ➔</button>
     `;
     grid.appendChild(card);
 }
@@ -2413,5 +2423,642 @@ function resetAttackGraphView() {
     if (_currentAttackGraph) {
         initAttackGraphCanvas(_currentAttackGraph);
     }
+}
+
+/* ============================================================
+   Interactive Phase Inspector Modal Implementation
+   ============================================================ */
+
+let _activeInspectorReport = null;
+let _activeInspectorRawLogs = [];
+
+function openPhaseInspector(agentKey) {
+    const key = normalizeAgentKey(agentKey || '');
+    const report = (window.currentPhaseReports && window.currentPhaseReports[key]) || null;
+    
+    const modal = document.getElementById('phaseInspectorModal');
+    if (!modal) return;
+
+    if (!report) {
+        alert(`No forensic artifacts recorded yet for phase: ${formatAgentName(key)}`);
+        return;
+    }
+
+    _activeInspectorReport = report;
+    const findings = report.findings || {};
+    _activeInspectorRawLogs = findings.raw_events || [];
+
+    // Header Setup
+    const titleEl = document.getElementById('phaseModalTitle');
+    const badgeEl = document.getElementById('phaseModalBadge');
+    const agentTagEl = document.getElementById('phaseModalAgentTag');
+    const durationEl = document.getElementById('phaseModalDuration');
+
+    const meta = getAgentMeta(key);
+    if (titleEl) titleEl.textContent = `${meta.label} — Phase Audit & Artifacts`;
+    if (badgeEl) {
+        const conf = report.confidence || 0;
+        badgeEl.textContent = `${(conf * 100).toFixed(0)}% Confidence`;
+        badgeEl.className = `badge ${conf >= 0.8 ? 'confidence-high' : conf >= 0.5 ? 'confidence-medium' : 'confidence-low'}`;
+    }
+    if (agentTagEl) agentTagEl.textContent = key;
+    if (durationEl) durationEl.textContent = `${report.duration_ms || 0}ms execution`;
+
+    // Render Tabs & Content based on phase type
+    const tabsContainer = document.getElementById('phaseModalTabs');
+    const bodyContainer = document.getElementById('phaseModalBody');
+    if (!tabsContainer || !bodyContainer) return;
+
+    tabsContainer.innerHTML = '';
+    bodyContainer.innerHTML = '';
+
+    if (key === 'compression_agent') {
+        renderCompressionInspectorView(report, tabsContainer, bodyContainer);
+    } else if (key === 'evidence_agent' || key === 'discovery_agent') {
+        renderEvidenceInspectorView(report, tabsContainer, bodyContainer);
+    } else if (key === 'triage_agent') {
+        renderTriageInspectorView(report, tabsContainer, bodyContainer);
+    } else if (key === 'rca_agent') {
+        renderRCAInspectorView(report, tabsContainer, bodyContainer);
+    } else if (key === 'response_agent') {
+        renderResponseInspectorView(report, tabsContainer, bodyContainer);
+    } else {
+        renderGenericInspectorView(report, tabsContainer, bodyContainer);
+    }
+
+    modal.style.display = 'flex';
+}
+
+function closePhaseInspector() {
+    const modal = document.getElementById('phaseInspectorModal');
+    if (modal) modal.style.display = 'none';
+    _activeInspectorReport = null;
+    _activeInspectorRawLogs = [];
+}
+
+function switchPhaseModalTab(tabId) {
+    document.querySelectorAll('.phase-tab-btn').forEach(btn => btn.classList.remove('active'));
+    document.querySelectorAll('.phase-modal-tab-pane').forEach(pane => pane.style.display = 'none');
+
+    const activeBtn = document.getElementById(`phaseTabBtn-${tabId}`);
+    const activePane = document.getElementById(`phaseTabPane-${tabId}`);
+    if (activeBtn) activeBtn.classList.add('active');
+    if (activePane) activePane.style.display = 'block';
+}
+
+// ------------------------------------------------------------
+// 1. Compression Agent Inspector (7-Stage Funnel & Raw Logs)
+// ------------------------------------------------------------
+function renderCompressionInspectorView(report, tabs, body) {
+    const findings = report.findings || {};
+    const origCount = findings.original_events || (_activeInspectorRawLogs ? _activeInspectorRawLogs.length : 0);
+    const compCount = findings.compressed_events || (findings.timeline ? findings.timeline.length : 0);
+    const ratio = findings.compression_ratio || (origCount > 0 && compCount > 0 ? `${(origCount / compCount).toFixed(1)}x` : 'N/A');
+    const stages = findings.stages || [];
+    const timeline = findings.timeline || [];
+    const attackGraph = findings.attack_graph || {};
+
+    // Tabs
+    tabs.innerHTML = `
+        <button class="phase-tab-btn active" id="phaseTabBtn-funnel" onclick="switchPhaseModalTab('funnel')">🗜️ 7-Stage Funnel Breakdown</button>
+        <button class="phase-tab-btn" id="phaseTabBtn-rawlogs" onclick="switchPhaseModalTab('rawlogs')">📥 Raw Ingested Logs (${origCount})</button>
+        <button class="phase-tab-btn" id="phaseTabBtn-milestones" onclick="switchPhaseModalTab('milestones')">📤 Compressed Attack Milestones (${compCount})</button>
+        <button class="phase-tab-btn" id="phaseTabBtn-subgraph" onclick="switchPhaseModalTab('subgraph')">🕸️ Attack Graph Subgraph</button>
+    `;
+
+    // KPI Cards
+    const kpiHtml = `
+        <div class="phase-kpi-grid">
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Raw Telemetry Ingested</span>
+                <span class="phase-kpi-val" style="color: #60a5fa;">${origCount}</span>
+                <span class="phase-kpi-sub">Across Auditd, Suricata, Auth, Wazuh</span>
+            </div>
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Compressed Milestones</span>
+                <span class="phase-kpi-val" style="color: #34d399;">${compCount}</span>
+                <span class="phase-kpi-sub">High-signal causal events</span>
+            </div>
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Noise Reduction Ratio</span>
+                <span class="phase-kpi-val" style="color: #fbbf24;">${ratio}</span>
+                <span class="phase-kpi-sub">${origCount > compCount ? `${origCount - compCount} noise events dropped` : 'Baseline'}</span>
+            </div>
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Skills Deployed</span>
+                <span class="phase-kpi-val" style="color: #a78bfa;">${(findings.skills_used || []).length}</span>
+                <span class="phase-kpi-sub">Agentic reduction stages</span>
+            </div>
+        </div>
+    `;
+
+    // Stage Funnel Rows
+    let funnelRows = '';
+    stages.forEach((stg, idx) => {
+        const inC = stg.input || 0;
+        const outC = stg.output || 0;
+        const pct = origCount > 0 ? Math.round((outC / origCount) * 100) : 100;
+        funnelRows += `
+            <tr>
+                <td><strong style="color:#f8fafc;">${idx + 1}. ${escapeHtml(stg.name)}</strong></td>
+                <td><span class="phase-agent-tag">${escapeHtml(stg.skill || '')}</span></td>
+                <td>${inC} events</td>
+                <td><strong style="color:#34d399;">${outC} events</strong></td>
+                <td><span class="badge" style="background: rgba(248,113,113,0.15); color: #f87171;">-${stg.reduction}</span></td>
+                <td style="width: 25%;">
+                    <div class="funnel-progress-bar">
+                        <div class="funnel-progress-fill" style="width: ${pct}%;"></div>
+                    </div>
+                </td>
+            </tr>
+        `;
+    });
+
+    // Raw Logs Table
+    let rawLogRows = '';
+    (_activeInspectorRawLogs || []).forEach((log, i) => {
+        const src = (log.source || 'general').toLowerCase();
+        let srcPill = `<span class="source-pill source-pill-general">${src}</span>`;
+        if (src.includes('audit')) srcPill = `<span class="source-pill source-pill-audit">Auditd</span>`;
+        else if (src.includes('suricata') || src.includes('ids')) srcPill = `<span class="source-pill source-pill-suricata">Suricata</span>`;
+        else if (src.includes('auth') || src.includes('syslog')) srcPill = `<span class="source-pill source-pill-auth">Auth</span>`;
+        else if (src.includes('wazuh')) srcPill = `<span class="source-pill source-pill-wazuh">Wazuh</span>`;
+
+        const risk = log.risk_score || 0.1;
+        const riskClass = risk >= 0.8 ? 'risk-high' : risk >= 0.5 ? 'risk-med' : 'risk-low';
+
+        rawLogRows += `
+            <tr data-source="${src}" class="raw-log-row">
+                <td style="color:#64748b; width:40px;">${i + 1}</td>
+                <td style="color:#94a3b8; white-space:nowrap;">${escapeHtml(log.timestamp || '')}</td>
+                <td>${srcPill}</td>
+                <td><strong style="color:#e2e8f0;">${escapeHtml(log.entity || '')}</strong></td>
+                <td style="color:#cbd5e1;">${escapeHtml(log.action || log.event_type || '')}</td>
+                <td><span class="risk-pill ${riskClass}">${risk}</span></td>
+            </tr>
+        `;
+    });
+
+    // Compressed Milestones Cards
+    let milestonesHtml = '';
+    (timeline || []).forEach((m, i) => {
+        const risk = m.risk_score || 0.5;
+        const riskClass = risk >= 0.8 ? 'risk-high' : risk >= 0.5 ? 'risk-med' : 'risk-low';
+        const mitre = m.mitre_technique_id ? `<span class="mitre-badge">${m.mitre_technique_id} - ${escapeHtml(m.mitre_technique_name || m.mitre_tactic || '')}</span>` : '';
+
+        milestonesHtml += `
+            <div class="milestone-card">
+                <div class="milestone-card-header">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span style="color:#64748b; font-size:0.75rem; font-family:var(--mono);">#${i + 1}</span>
+                        <span style="color:#38bdf8; font-size:0.8rem; font-family:var(--mono);">${escapeHtml(m.timestamp || '')}</span>
+                        <strong style="color:#f8fafc; font-size:0.9rem;">${escapeHtml(m.entity || '')}</strong>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        ${mitre}
+                        <span class="risk-pill ${riskClass}">Risk: ${risk}</span>
+                    </div>
+                </div>
+                <div style="font-size:0.85rem; color:#cbd5e1; line-height:1.4;">
+                    ${escapeHtml(m.action || m.event_type || '')}
+                </div>
+            </div>
+        `;
+    });
+
+    // Subgraph categories
+    let subgraphHtml = '<div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:16px;">';
+    for (const [cat, items] of Object.entries(attackGraph || {})) {
+        subgraphHtml += `
+            <div style="background:#111827; border:1px solid #1f2937; border-radius:8px; padding:16px;">
+                <h4 style="margin-top:0; color:#38bdf8; text-transform:uppercase; font-size:0.8rem; letter-spacing:0.05em;">${escapeHtml(cat.replace(/_/g, ' '))}</h4>
+                <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:8px;">
+                    ${(Array.isArray(items) ? items : []).map(it => `<span class="artifact-tag" style="background:#1e293b; color:#f8fafc;">${escapeHtml(it)}</span>`).join('')}
+                </div>
+            </div>
+        `;
+    }
+    subgraphHtml += '</div>';
+
+    body.innerHTML = `
+        ${kpiHtml}
+
+        <!-- Tab 1: Funnel -->
+        <div class="phase-modal-tab-pane" id="phaseTabPane-funnel" style="display: block;">
+            <h3 style="margin-bottom:12px; font-size:1rem; color:#f8fafc;">7-Stage Agentic Reduction Pipeline</h3>
+            <table class="funnel-table">
+                <thead>
+                    <tr>
+                        <th>Stage Name</th>
+                        <th>Applied Skill</th>
+                        <th>Input Events</th>
+                        <th>Output Events</th>
+                        <th>Reduction</th>
+                        <th>Retention Funnel</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${funnelRows || '<tr><td colspan="6" style="text-align:center; color:#64748b;">No stage metrics recorded</td></tr>'}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Tab 2: Raw Logs -->
+        <div class="phase-modal-tab-pane" id="phaseTabPane-rawlogs" style="display: none;">
+            <div class="log-viewer-search-bar">
+                <input type="text" class="log-search-input" id="rawLogSearchInput" placeholder="🔍 Search by entity, process name, command line, or timestamp..." oninput="filterRawLogsInspector()">
+                <select class="log-source-filter" id="rawLogSourceFilter" onchange="filterRawLogsInspector()">
+                    <option value="all">All Sources (${origCount})</option>
+                    <option value="audit">Auditd</option>
+                    <option value="suricata">Suricata</option>
+                    <option value="auth">Auth / Syslog</option>
+                    <option value="wazuh">Wazuh SIEM</option>
+                </select>
+            </div>
+            <div class="log-table-container">
+                <table class="log-table">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Timestamp</th>
+                            <th>Source</th>
+                            <th>Entity</th>
+                            <th>Action / Command</th>
+                            <th>Risk</th>
+                        </tr>
+                    </thead>
+                    <tbody id="rawLogTableBody">
+                        ${rawLogRows || '<tr><td colspan="6" style="text-align:center; padding:30px; color:#64748b;">No raw logs available in report findings</td></tr>'}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Tab 3: Milestones -->
+        <div class="phase-modal-tab-pane" id="phaseTabPane-milestones" style="display: none;">
+            <h3 style="margin-bottom:12px; font-size:1rem; color:#f8fafc;">High-Signal Attack Milestones (${compCount})</h3>
+            <div style="max-height: 520px; overflow-y: auto;">
+                ${milestonesHtml || '<div style="color:#64748b; text-align:center; padding:30px;">No milestones generated</div>'}
+            </div>
+        </div>
+
+        <!-- Tab 4: Subgraph -->
+        <div class="phase-modal-tab-pane" id="phaseTabPane-subgraph" style="display: none;">
+            <h3 style="margin-bottom:12px; font-size:1rem; color:#f8fafc;">Extracted Causal Attack Subgraph</h3>
+            ${subgraphHtml}
+        </div>
+    `;
+}
+
+function filterRawLogsInspector() {
+    const q = (document.getElementById('rawLogSearchInput')?.value || '').toLowerCase();
+    const srcFilter = (document.getElementById('rawLogSourceFilter')?.value || 'all').toLowerCase();
+
+    document.querySelectorAll('.raw-log-row').forEach(row => {
+        const rowSrc = (row.dataset.source || '').toLowerCase();
+        const text = row.innerText.toLowerCase();
+        const matchesQuery = !q || text.includes(q);
+        const matchesSrc = srcFilter === 'all' || rowSrc.includes(srcFilter);
+
+        row.style.display = matchesQuery && matchesSrc ? '' : 'none';
+    });
+}
+
+// ------------------------------------------------------------
+// 2. Evidence Agent Inspector (Entity Graph, Sockets, Cron)
+// ------------------------------------------------------------
+function renderEvidenceInspectorView(report, tabs, body) {
+    const findings = report.findings || {};
+    const entityGraph = findings.entity_graph || {};
+    const relationships = findings.relationships || [];
+    const skillsUsed = findings.skills_used || [];
+
+    const entityList = Object.entries(entityGraph);
+
+    tabs.innerHTML = `
+        <button class="phase-tab-btn active" id="phaseTabBtn-entities" onclick="switchPhaseModalTab('entities')">📊 Discovered Entities (${entityList.length})</button>
+        <button class="phase-tab-btn" id="phaseTabBtn-deepforensics" onclick="switchPhaseModalTab('deepforensics')">🌳 Deep Forensic Profiles</button>
+        <button class="phase-tab-btn" id="phaseTabBtn-rels" onclick="switchPhaseModalTab('rels')">🔗 Entity Relationships (${relationships.length})</button>
+    `;
+
+    // KPI Cards
+    const kpiHtml = `
+        <div class="phase-kpi-grid">
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Graph Entities</span>
+                <span class="phase-kpi-val" style="color: #60a5fa;">${entityList.length}</span>
+                <span class="phase-kpi-sub">Enriched forensic nodes</span>
+            </div>
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Causal Relationships</span>
+                <span class="phase-kpi-val" style="color: #34d399;">${relationships.length}</span>
+                <span class="phase-kpi-sub">Cross-entity links</span>
+            </div>
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Skills Deployed</span>
+                <span class="phase-kpi-val" style="color: #fbbf24;">${skillsUsed.length}</span>
+                <span class="phase-kpi-sub">EDR & Network collectors</span>
+            </div>
+        </div>
+    `;
+
+    // Entities Table
+    let entityRows = '';
+    entityList.forEach(([eid, edata]) => {
+        const risk = edata.risk_score || 0.1;
+        const riskClass = risk >= 0.8 ? 'risk-high' : risk >= 0.5 ? 'risk-med' : 'risk-low';
+        const ti = edata.threat_intel || {};
+        const sigs = (ti.suricata_signatures || []).concat(ti.wazuh_rule_ids || []).join(', ') || 'None';
+
+        entityRows += `
+            <tr>
+                <td><strong style="color:#f8fafc;">${escapeHtml(edata.id || eid)}</strong></td>
+                <td><span class="phase-agent-tag">${escapeHtml(edata.type || 'entity')}</span></td>
+                <td><span class="risk-pill ${riskClass}">${risk}</span></td>
+                <td>${edata.evidence_count || 0} hits</td>
+                <td style="color:${ti.is_known_malicious ? '#f87171' : '#34d399'}; font-weight:600;">${ti.is_known_malicious ? '⚠️ Known Malicious' : 'Monitored'}</td>
+                <td style="color:#94a3b8; font-size:0.75rem;">${escapeHtml(sigs)}</td>
+            </tr>
+        `;
+    });
+
+    // Deep Forensics Cards
+    let forensicsCards = '';
+    entityList.forEach(([eid, edata]) => {
+        const enr = edata.enrichment || {};
+        const sockets = enr.open_sockets ? `<div><strong>Open Sockets:</strong> <code>${enr.open_sockets.join(', ')}</code></div>` : '';
+        const beacon = enr.beaconing_detected ? `<div style="color:#f87171; font-weight:bold;">⚠️ Active C2 Beaconing Detected</div>` : '';
+        const cron = enr.suspicious_scripts ? `<div><strong>Suspicious Cron/Scripts:</strong> <code>${enr.suspicious_scripts.join(', ')}</code></div>` : '';
+        const cmds = enr.access_commands ? `<div><strong>Observed Executions:</strong><pre style="background:#090d16; padding:8px; border-radius:4px; margin-top:4px; font-size:0.75rem;">${escapeHtml(enr.access_commands.join('\n'))}</pre></div>` : '';
+
+        forensicsCards += `
+            <div style="background:#111827; border:1px solid #1f2937; border-radius:8px; padding:16px; margin-bottom:12px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                    <h4 style="margin:0; color:#38bdf8; font-size:1rem;">${escapeHtml(edata.id || eid)} (${edata.type})</h4>
+                    <span class="badge" style="background:#1e293b;">Risk: ${edata.risk_score}</span>
+                </div>
+                <div style="display:flex; flex-direction:column; gap:8px; font-size:0.85rem; color:#cbd5e1;">
+                    ${beacon}
+                    ${sockets}
+                    ${cron}
+                    ${cmds}
+                </div>
+            </div>
+        `;
+    });
+
+    // Relationships Table
+    let relRows = '';
+    relationships.forEach(r => {
+        relRows += `
+            <tr>
+                <td><strong style="color:#38bdf8;">${escapeHtml(r.source)}</strong></td>
+                <td><span class="phase-agent-tag" style="color:#fbbf24;">➔ ${escapeHtml(r.type)} ➔</span></td>
+                <td><strong style="color:#34d399;">${escapeHtml(r.target)}</strong></td>
+            </tr>
+        `;
+    });
+
+    body.innerHTML = `
+        ${kpiHtml}
+        <div class="phase-modal-tab-pane" id="phaseTabPane-entities" style="display: block;">
+            <table class="funnel-table">
+                <thead>
+                    <tr>
+                        <th>Entity Name / IOC</th>
+                        <th>Type</th>
+                        <th>Risk Score</th>
+                        <th>Telemetry Hits</th>
+                        <th>Threat Intel Verdict</th>
+                        <th>Matching Signatures</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${entityRows || '<tr><td colspan="6" style="text-align:center;">No entities recorded</td></tr>'}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="phase-modal-tab-pane" id="phaseTabPane-deepforensics" style="display: none;">
+            ${forensicsCards || '<div style="color:#64748b; text-align:center;">No deep forensic data</div>'}
+        </div>
+
+        <div class="phase-modal-tab-pane" id="phaseTabPane-rels" style="display: none;">
+            <table class="funnel-table">
+                <thead>
+                    <tr>
+                        <th>Source Node</th>
+                        <th>Relationship Type</th>
+                        <th>Target Node</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${relRows || '<tr><td colspan="3" style="text-align:center;">No relationships found</td></tr>'}
+                </tbody>
+            </table>
+        </div>
+    `;
+}
+
+// ------------------------------------------------------------
+// 3. Triage Agent Inspector
+// ------------------------------------------------------------
+function renderTriageInspectorView(report, tabs, body) {
+    const findings = report.findings || {};
+    const entities = findings.entities_identified || [];
+
+    tabs.innerHTML = `
+        <button class="phase-tab-btn active" id="phaseTabBtn-triage" onclick="switchPhaseModalTab('triage')">🎯 Triage Scope & Classification</button>
+    `;
+
+    body.innerHTML = `
+        <div class="phase-kpi-grid">
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Classification</span>
+                <span class="phase-kpi-val" style="color: #f87171;">${findings.classification || 'Unknown'}</span>
+                <span class="phase-kpi-sub">Severity: ${findings.severity || 'High'}</span>
+            </div>
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Seed Entities Identified</span>
+                <span class="phase-kpi-val" style="color: #60a5fa;">${entities.length}</span>
+                <span class="phase-kpi-sub">Grounded IOCs</span>
+            </div>
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Immediate Action</span>
+                <span class="phase-kpi-val" style="color: ${findings.requires_immediate_action ? '#ef4444' : '#34d399'};">
+                    ${findings.requires_immediate_action ? 'REQUIRED' : 'Standard'}
+                </span>
+                <span class="phase-kpi-sub">Triage priority</span>
+            </div>
+        </div>
+
+        <div style="background:#111827; border:1px solid #1f2937; border-radius:8px; padding:18px; margin-bottom:16px;">
+            <h4 style="color:#38bdf8; margin-top:0;">Initial Assessment Reasoning</h4>
+            <p style="color:#cbd5e1; font-size:0.9rem; line-height:1.6;">${escapeHtml(findings.initial_assessment || findings.summary || 'No narrative assessment provided.')}</p>
+        </div>
+
+        <h4 style="color:#f8fafc; margin-bottom:10px;">Grounded Seed Entities</h4>
+        <table class="funnel-table">
+            <thead>
+                <tr>
+                    <th>Entity Identifier</th>
+                    <th>Type</th>
+                    <th>Confidence</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${entities.map(e => `
+                    <tr>
+                        <td><strong style="color:#f8fafc;">${escapeHtml(e.id || e.name || '')}</strong></td>
+                        <td><span class="phase-agent-tag">${escapeHtml(e.type || '')}</span></td>
+                        <td><span class="risk-pill risk-high">${(e.confidence || 0.9) * 100}%</span></td>
+                    </tr>
+                `).join('') || '<tr><td colspan="3" style="text-align:center;">No entities grounded</td></tr>'}
+            </tbody>
+        </table>
+    `;
+}
+
+// ------------------------------------------------------------
+// 4. RCA Agent Inspector
+// ------------------------------------------------------------
+function renderRCAInspectorView(report, tabs, body) {
+    const findings = report.findings || {};
+    const phases = findings.attack_phases || [];
+    const cot = findings.chain_of_thought_verification || findings.reasoning || '';
+    const candidates = findings.structural_causal_candidates || [];
+
+    tabs.innerHTML = `
+        <button class="phase-tab-btn active" id="phaseTabBtn-rca" onclick="switchPhaseModalTab('rca')">🔬 Root Cause & Blast Radius</button>
+        <button class="phase-tab-btn" id="phaseTabBtn-phases" onclick="switchPhaseModalTab('phases')">⏱️ Attack Chain Phases (${phases.length})</button>
+        <button class="phase-tab-btn" id="phaseTabBtn-cot" onclick="switchPhaseModalTab('cot')">🧠 Chain-of-Thought Critique</button>
+    `;
+
+    body.innerHTML = `
+        <div class="phase-kpi-grid">
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">RCA Confidence</span>
+                <span class="phase-kpi-val" style="color: #34d399;">${((report.confidence || 0) * 100).toFixed(0)}%</span>
+                <span class="phase-kpi-sub">Validated Causal Graph</span>
+            </div>
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Blast Radius</span>
+                <span class="phase-kpi-val" style="color: #ef4444;">${findings.blast_radius || 1} entities</span>
+                <span class="phase-kpi-sub">Compromised scope</span>
+            </div>
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Attack Phases</span>
+                <span class="phase-kpi-val" style="color: #fbbf24;">${phases.length}</span>
+                <span class="phase-kpi-sub">Reconstructed steps</span>
+            </div>
+        </div>
+
+        <div class="phase-modal-tab-pane" id="phaseTabPane-rca" style="display: block;">
+            <div style="background:#111827; border:1px solid #3b82f6; border-radius:8px; padding:18px; margin-bottom:16px;">
+                <h4 style="color:#60a5fa; margin-top:0;">Identified Root Cause</h4>
+                <div style="color:#f8fafc; font-size:1.05rem; font-weight:600; line-height:1.5;">${escapeHtml(findings.root_cause || 'Root cause undetermined')}</div>
+            </div>
+
+            <h4 style="color:#f8fafc; margin-bottom:10px;">Structural Causal Candidates</h4>
+            <table class="funnel-table">
+                <thead>
+                    <tr>
+                        <th>Candidate Entity</th>
+                        <th>Causal Score</th>
+                        <th>Reasoning</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${candidates.map(c => `
+                        <tr>
+                            <td><strong style="color:#f8fafc;">${escapeHtml(c.candidate_entity || '')}</strong></td>
+                            <td><span class="risk-pill risk-high">${c.causal_score || 0}</span></td>
+                            <td style="color:#cbd5e1;">${escapeHtml(c.reasoning || '')}</td>
+                        </tr>
+                    `).join('') || '<tr><td colspan="3" style="text-align:center;">No causal candidates</td></tr>'}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="phase-modal-tab-pane" id="phaseTabPane-phases" style="display: none;">
+            <div style="padding-left:20px; position:relative;">
+                ${phases.map((p, idx) => `
+                    <div class="attack-phase-item">
+                        <div style="font-weight:bold; color:#f8fafc; font-size:0.95rem;">Phase ${idx + 1}</div>
+                        <div style="color:#cbd5e1; font-size:0.88rem; margin-top:4px;">${escapeHtml(p)}</div>
+                    </div>
+                `).join('') || '<div style="color:#64748b;">No attack phases reconstructed</div>'}
+            </div>
+        </div>
+
+        <div class="phase-modal-tab-pane" id="phaseTabPane-cot" style="display: none;">
+            <h4 style="color:#a78bfa; margin-top:0;">Chain-of-Thought Self-Verification & Critique</h4>
+            <div class="hist-cot-box">${escapeHtml(cot || 'No verification reasoning recorded.')}</div>
+        </div>
+    `;
+}
+
+// ------------------------------------------------------------
+// 5. Response Agent Inspector
+// ------------------------------------------------------------
+function renderResponseInspectorView(report, tabs, body) {
+    const findings = report.findings || {};
+    const actions = findings.actions_recommended || [];
+
+    tabs.innerHTML = `
+        <button class="phase-tab-btn active" id="phaseTabBtn-playbook" onclick="switchPhaseModalTab('playbook')">⚡ Prioritized Containment Playbook (${actions.length})</button>
+    `;
+
+    body.innerHTML = `
+        <div class="phase-kpi-grid">
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Recommended Actions</span>
+                <span class="phase-kpi-val" style="color: #34d399;">${actions.length}</span>
+                <span class="phase-kpi-sub">Containment steps</span>
+            </div>
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Critical Actions</span>
+                <span class="phase-kpi-val" style="color: #ef4444;">${findings.critical_actions || 0}</span>
+                <span class="phase-kpi-sub">Immediate execution</span>
+            </div>
+        </div>
+
+        <table class="funnel-table">
+            <thead>
+                <tr>
+                    <th>Priority</th>
+                    <th>Action</th>
+                    <th>Target Entity</th>
+                    <th>Execution Command</th>
+                    <th>Requires Approval</th>
+                    <th>Rollback Procedure</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${actions.map(a => `
+                    <tr>
+                        <td><span class="risk-pill ${a.priority === 1 ? 'risk-high' : 'risk-med'}">P${a.priority || 1}</span></td>
+                        <td><strong style="color:#f8fafc;">${escapeHtml(a.action || '')}</strong></td>
+                        <td><strong style="color:#38bdf8;">${escapeHtml(a.target_entity || '')}</strong></td>
+                        <td><code style="background:#090d16; padding:4px 8px; border-radius:4px; font-size:0.75rem;">${escapeHtml(a.command || 'N/A')}</code></td>
+                        <td><span class="badge" style="background:${a.requires_approval ? 'rgba(239,68,68,0.2)' : 'rgba(16,185,129,0.2)'}; color:${a.requires_approval ? '#f87171' : '#34d399'};">${a.requires_approval ? 'Required' : 'Auto'}</span></td>
+                        <td style="color:#94a3b8; font-size:0.75rem;">${escapeHtml(a.rollback_procedure || 'None')}</td>
+                    </tr>
+                `).join('') || '<tr><td colspan="6" style="text-align:center;">No actions planned</td></tr>'}
+            </tbody>
+        </table>
+    `;
+}
+
+// ------------------------------------------------------------
+// Generic Fallback Inspector
+// ------------------------------------------------------------
+function renderGenericInspectorView(report, tabs, body) {
+    tabs.innerHTML = `<button class="phase-tab-btn active">📋 Phase Findings</button>`;
+    body.innerHTML = `
+        <pre style="background:#090d16; padding:16px; border-radius:8px; font-size:0.8rem; overflow-x:auto; color:#cbd5e1;">
+${escapeHtml(JSON.stringify(report.findings || {}, null, 2))}
+        </pre>
+    `;
 }
 

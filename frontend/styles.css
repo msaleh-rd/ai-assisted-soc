@@ -933,3 +933,361 @@ textarea.code-input {
     display: none;
 }
 
+/* ============================================================
+   Phase Inspector Modal & Forensic Log Viewer
+   ============================================================ */
+.phase-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.phase-modal-backdrop {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(8, 12, 22, 0.85);
+    backdrop-filter: blur(8px);
+}
+
+.phase-modal-dialog {
+    position: relative;
+    width: 92%;
+    max-width: 1200px;
+    height: 88vh;
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.8), 0 0 30px rgba(59, 130, 246, 0.15);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    z-index: 10;
+    animation: modalSlideUp 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes modalSlideUp {
+    from { opacity: 0; transform: translateY(20px) scale(0.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.phase-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 24px;
+    background: #1e293b;
+    border-bottom: 1px solid #334155;
+}
+
+.phase-modal-title-group {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.phase-agent-tag {
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    padding: 3px 8px;
+    background: #0f172a;
+    border: 1px solid #475569;
+    border-radius: 4px;
+    color: #94a3b8;
+}
+
+.phase-modal-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.phase-modal-duration {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.1);
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(56, 189, 248, 0.2);
+}
+
+.phase-modal-close {
+    font-size: 1.3rem;
+    line-height: 1;
+    padding: 4px 10px;
+    cursor: pointer;
+}
+
+.phase-modal-tabs {
+    display: flex;
+    gap: 8px;
+    padding: 10px 24px 0;
+    background: #1e293b;
+    border-bottom: 1px solid #334155;
+    overflow-x: auto;
+}
+
+.phase-tab-btn {
+    padding: 8px 16px;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: #94a3b8;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+}
+
+.phase-tab-btn:hover {
+    color: #f8fafc;
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.phase-tab-btn.active {
+    color: #38bdf8;
+    border-bottom-color: #38bdf8;
+    background: rgba(56, 189, 248, 0.08);
+}
+
+.phase-modal-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+    background: #0b1120;
+}
+
+/* Phase KPI Cards Grid */
+.phase-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.phase-kpi-card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.phase-kpi-label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #94a3b8;
+}
+
+.phase-kpi-val {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #f8fafc;
+}
+
+.phase-kpi-sub {
+    font-size: 0.75rem;
+    color: #64748b;
+}
+
+/* 7-Stage Funnel Table */
+.funnel-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 20px;
+    background: #111827;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid #1f2937;
+}
+
+.funnel-table th, .funnel-table td {
+    padding: 12px 16px;
+    text-align: left;
+    font-size: 0.85rem;
+    border-bottom: 1px solid #1f2937;
+}
+
+.funnel-table th {
+    background: #1e293b;
+    color: #94a3b8;
+    font-weight: 600;
+}
+
+.funnel-progress-bar {
+    height: 8px;
+    background: #1e293b;
+    border-radius: 4px;
+    overflow: hidden;
+    width: 100%;
+    margin-top: 4px;
+}
+
+.funnel-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #3b82f6, #10b981);
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+/* Log Viewer Search & Table */
+.log-viewer-search-bar {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.log-search-input {
+    flex: 1;
+    background: #111827;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 8px 14px;
+    color: #f8fafc;
+    font-size: 0.85rem;
+}
+
+.log-source-filter {
+    background: #111827;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: #f8fafc;
+    font-size: 0.85rem;
+}
+
+.log-table-container {
+    max-height: 520px;
+    overflow-y: auto;
+    background: #090d16;
+    border: 1px solid #1f2937;
+    border-radius: 8px;
+}
+
+.log-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+}
+
+.log-table th {
+    position: sticky;
+    top: 0;
+    background: #1e293b;
+    padding: 10px 12px;
+    color: #94a3b8;
+    font-weight: 600;
+    text-align: left;
+    border-bottom: 1px solid #334155;
+    z-index: 2;
+}
+
+.log-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid #161f30;
+    color: #cbd5e1;
+}
+
+.log-table tr:hover td {
+    background: rgba(59, 130, 246, 0.05);
+}
+
+/* Source Badges */
+.source-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.source-pill-audit { background: rgba(168, 85, 247, 0.15); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
+.source-pill-suricata { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+.source-pill-auth { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+.source-pill-wazuh { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+.source-pill-general { background: rgba(148, 163, 184, 0.15); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.3); }
+
+/* Milestone Card */
+.milestone-card {
+    background: #111827;
+    border: 1px solid #1f2937;
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    transition: transform 0.15s ease, border-color 0.15s ease;
+}
+
+.milestone-card:hover {
+    border-color: #3b82f6;
+    transform: translateX(4px);
+}
+
+.milestone-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.mitre-badge {
+    background: rgba(239, 68, 68, 0.15);
+    color: #f87171;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.72rem;
+    font-weight: 600;
+}
+
+.risk-pill {
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.72rem;
+    font-weight: bold;
+}
+.risk-high { background: #ef4444; color: #fff; }
+.risk-med { background: #f59e0b; color: #000; }
+.risk-low { background: #10b981; color: #fff; }
+
+.inspect-phase-btn {
+    background: rgba(59, 130, 246, 0.12);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    color: #60a5fa;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    margin-top: 8px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.inspect-phase-btn:hover {
+    background: rgba(59, 130, 246, 0.25);
+    color: #ffffff;
+    border-color: #3b82f6;
+}
+
