@@ -617,10 +617,8 @@ class RiskScorer:
         # Filter low-risk events — use adaptive threshold based on the score distribution
         if events:
             scores = sorted([e.risk_score for e in events], reverse=True)
-            # Threshold: median score or 0.5, whichever is higher
             median_score = scores[len(scores) // 2]
-            threshold = max(0.5, median_score)
-            high_risk_events = [e for e in events if e.risk_score >= threshold]
+            high_risk_events = [e for e in events if e.risk_score >= 0.3]
         else:
             high_risk_events = []
         if not high_risk_events and events:
@@ -729,7 +727,7 @@ class CorrelationEngine:
         pattern_entities = {p.get('entity') for p in patterns if p.get('entity')}
         if pattern_entities:
             graph_events = [e for e in deduped_events
-                           if e.entity_id in pattern_entities or e.risk_score >= 0.7]
+                           if e.entity_id in pattern_entities or e.risk_score >= 0.4]
         else:
             graph_events = deduped_events
         if not graph_events:
