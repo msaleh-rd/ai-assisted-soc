@@ -76,6 +76,7 @@ class CompressedPackage:
     confidence: float
     created_at: datetime
     stage_metrics: List[StageMetrics] = field(default_factory=list)
+    abstractions: List[Dict] = field(default_factory=list)
 
     @property
     def raw_event_count(self) -> int:
@@ -409,9 +410,14 @@ class EventDeduplicator:
     
     @staticmethod
     def _create_fingerprint(event: CorrelatedEvent) -> str:
-        """Create fingerprint for deduplication."""
+        """Create fingerprint for deduplication.
         
-        key = f"{event.event_type}:{event.entity_id}:{event.action}"
+        Uses normalized action (first 60 chars, stripped of variable data like PIDs/timestamps)
+        to catch near-duplicate events with slightly different parameters.
+        """
+        import re
+        action_norm = re.sub(r'\b\d+\b', 'N', str(event.action))[:60]
+        key = f"{event.event_type}:{event.entity_id}:{action_norm}"
         return hashlib.md5(key.encode()).hexdigest()
 
 
@@ -542,17 +548,19 @@ class AbstractionEngine:
     Reduction: 20-40%
     """
     
-    def abstract_events(self, events: List[CorrelatedEvent]) -> List[Dict]:
-        """Create high-level abstractions of events."""
+    def abstract_events(self, events: List[CorrelatedEvent]) -> List[CorrelatedEvent]:
+        """Create high-level abstractions by picking the highest-risk representative per entity."""
         
         abstractions = []
-        
-        # Group by entity and time window
         entity_groups = self._group_by_entity(events)
         
         for entity, entity_events in entity_groups.items():
-            abstraction = self._create_entity_abstraction(entity, entity_events)
-            abstractions.append(abstraction)
+            rep = max(entity_events, key=lambda e: e.risk_score)
+            rep.compression_ratio = len(entity_events)
+            rep.raw_events = []
+            for e in entity_events:
+                rep.raw_events.extend(e.raw_events if e.raw_events else [{"action": e.action}])
+            abstractions.append(rep)
         
         return abstractions
     
@@ -566,25 +574,6 @@ class AbstractionEngine:
             groups[event.entity_id].append(event)
         
         return groups
-    
-    @staticmethod
-    def _create_entity_abstraction(entity_id: str, 
-                                  events: List[CorrelatedEvent]) -> Dict:
-        """Create abstraction for entity's activities."""
-        
-        actions = defaultdict(int)
-        for event in events:
-            actions[event.action] += 1
-        
-        return {
-            'entity': entity_id,
-            'event_count': len(events),
-            'action_summary': dict(actions),
-            'time_span': {
-                'start': min(e.timestamp for e in events).isoformat(),
-                'end': max(e.timestamp for e in events).isoformat()
-            }
-        }
 
 
 class RiskScorer:
@@ -625,10 +614,16 @@ class RiskScorer:
                             event.risk_score = 0.4  # boost above threshold
                             break
 
-        # Filter low-risk events
-        high_risk_events = [e for e in events if e.risk_score > 0.3]
+        # Filter low-risk events — use adaptive threshold based on the score distribution
+        if events:
+            scores = sorted([e.risk_score for e in events], reverse=True)
+            # Threshold: median score or 0.5, whichever is higher
+            median_score = scores[len(scores) // 2]
+            threshold = max(0.5, median_score)
+            high_risk_events = [e for e in events if e.risk_score >= threshold]
+        else:
+            high_risk_events = []
         if not high_risk_events and events:
-            # If no event exceeded 0.3 threshold, keep top risk events (top 20% or minimum 5)
             top_k = min(max(5, int(len(events) * 0.2)), len(events))
             high_risk_events = sorted(events, key=lambda e: e.risk_score, reverse=True)[:top_k]
         
@@ -728,11 +723,15 @@ class CorrelationEngine:
             reduction_pct=round(reduction * 100, 1), skill="duplicate-rollup"
         ))
         
-        # Stage 5: Graph Analysis
+        # Stage 5: Graph Analysis — keep only events tied to detected attack patterns
         count_before = len(deduped_events)
         patterns, reduction = self.graph_analyzer.analyze_relationships(deduped_events)
-        # Filter down to events connected to attack graph patterns or elevated risk
-        graph_events = [e for e in deduped_events if e.risk_score >= 0.4 or any(e.entity_id in str(p) for p in patterns)]
+        pattern_entities = {p.get('entity') for p in patterns if p.get('entity')}
+        if pattern_entities:
+            graph_events = [e for e in deduped_events
+                           if e.entity_id in pattern_entities or e.risk_score >= 0.7]
+        else:
+            graph_events = deduped_events
         if not graph_events:
             graph_events = deduped_events
         count_after = len(graph_events)
@@ -742,15 +741,7 @@ class CorrelationEngine:
             reduction_pct=round(graph_reduction * 100, 1), skill="entity-graph-reduction"
         ))
         
-        # Stage 6: Abstraction
-        abstractions = self.abstraction_engine.abstract_events(graph_events)
-        stage_metrics.append(StageMetrics(
-            name="Abstraction", input_count=len(graph_events), output_count=len(abstractions),
-            reduction_pct=round((1.0 - len(abstractions) / max(len(graph_events), 1)) * 100, 1),
-            skill="semantic-summarizer"
-        ))
-        
-        # Stage 7: Risk Scoring
+        # Stage 6: Risk Scoring
         count_before = len(graph_events)
         high_risk_events = self.risk_scorer.score_risks(graph_events, patterns)
         count_after = len(high_risk_events)
@@ -760,16 +751,25 @@ class CorrelationEngine:
             skill="semantic-summarizer"
         ))
         
+        # Stage 7: Abstraction (summarizes final events into entity-level groups)
+        abstractions = self.abstraction_engine.abstract_events(high_risk_events)
+        stage_metrics.append(StageMetrics(
+            name="Abstraction", input_count=len(high_risk_events), output_count=len(abstractions),
+            reduction_pct=round((1.0 - len(abstractions) / max(len(high_risk_events), 1)) * 100, 1),
+            skill="semantic-summarizer"
+        ))
+        
         # Build compressed package
         package = CompressedPackage(
             investigation_id=investigation_id,
             original_event_count=original_count,
-            compressed_event_count=len(high_risk_events),
-            compression_ratio=original_count / len(high_risk_events) if high_risk_events else 1.0,
-            events=high_risk_events,
-            timeline=self._build_timeline(high_risk_events),
+            compressed_event_count=len(abstractions),
+            compression_ratio=original_count / len(abstractions) if abstractions else 1.0,
+            events=abstractions,
+            timeline=self._build_timeline(abstractions),
             attack_graph=self._build_attack_graph(patterns),
             detected_patterns=patterns,
+            abstractions=abstractions,
             risk_score=self._calculate_package_risk(high_risk_events, patterns),
             confidence=self._calculate_confidence(high_risk_events),
             created_at=datetime.now(),
