@@ -95,486 +95,68 @@ class EvidenceCollector(ABC):
         return False
 
 
+from backend.services.evidence.skill_handlers import EvidenceSkillExecutor
+
+
 class UserEvidenceCollector(EvidenceCollector):
-    """Collect user-related evidence."""
+    """Collect user-related evidence via identity-ad-lookup skill."""
     
     def __init__(self):
         super().__init__(EntityType.USER)
     
-    async def collect(self, user_id: str,
-                     context: Dict[str, Any]) -> Dict[str, Any]:
-        """Collect user profile, activities, and risk indicators."""
-        db_record = self._fetch_from_db(user_id)
-        if db_record:
-            return db_record
-
-        # Check logs via LogIngestor
-        ingestor = self._get_ingestor()
-        user_events = []
-        if ingestor:
-            try:
-                user_events = ingestor.get_user_activity(user_id) or ingestor.search_entity(user_id, "user", max_results=50)
-            except Exception as e:
-                logger.debug(f"Log search for user {user_id} error: {e}")
-
-        is_privileged = user_id.lower() in ("root", "admin", "administrator", "system", "daemon") or any("uid=0" in str(e.get("raw", "")) for e in user_events)
-        
-        failed_logins = sum(1 for e in user_events if "failed" in str(e.get("action", "")).lower() or "invalid" in str(e.get("action", "")).lower())
-        successful_logins = sum(1 for e in user_events if "accepted" in str(e.get("action", "")).lower() or "session opened" in str(e.get("action", "")).lower())
-        
-        max_log_risk = max([e.get("risk_score", 0.1) for e in user_events], default=0.1)
-        if failed_logins >= 5:
-            user_risk = 0.8
-        elif failed_logins >= 1:
-            user_risk = 0.5
-        elif is_privileged:
-            user_risk = 0.25
-        else:
-            user_risk = max_log_risk
-
-        dept = "System Administration" if is_privileged else "Engineering"
-        title = "Infrastructure / Root Account" if is_privileged else "Software Engineer"
-        
-        return {
-            'enrichment_data': {
-                'email': f"{user_id}@company.com" if user_id.lower() != "root" else "root@localhost",
-                'department': dept,
-                'title': title,
-                'manager': 'admin@company.com' if not is_privileged else 'CISO',
-                'mfa_enabled': not is_privileged,
-                'account_enabled': True,
-                'last_login': user_events[0].get("timestamp") if user_events else (datetime.utcnow().isoformat() + 'Z'),
-                'failed_login_count': failed_logins,
-                'successful_login_count': successful_logins,
-                'privileged': is_privileged,
-                'groups': ['wheel', 'sudo', 'root'] if is_privileged else ['Engineering', 'Development'],
-            },
-            'threat_intel': {
-                'credentials_exposed': failed_logins > 3,
-                'high_risk_login': failed_logins > 0,
-                'unusual_location': False,
-                'observed_events_count': len(user_events),
-            },
-            'risk_score': round(user_risk, 2),
-        }
+    async def collect(self, user_id: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        return await EvidenceSkillExecutor.execute_skill("identity-ad-lookup", user_id, "user", context)
 
 
 class HostEvidenceCollector(EvidenceCollector):
-    """Collect host-related evidence."""
+    """Collect host-related evidence via persistence-auditor and telemetry."""
     
     def __init__(self):
         super().__init__(EntityType.HOST)
     
-    async def collect(self, host_id: str,
-                     context: Dict[str, Any]) -> Dict[str, Any]:
-        """Collect host information, posture, and risk dynamically from telemetry."""
-        db_record = self._fetch_from_db(host_id)
-        if db_record:
-            return db_record
-
-        # Check telemetry from LogIngestor
-        ingestor = self._get_ingestor()
-        host_logs = {"audit": [], "auth": [], "suricata": [], "wazuh": [], "system": []}
-        all_host_events = []
-        if ingestor:
-            try:
-                host_logs = ingestor.get_host_logs(host_id)
-                all_host_events = ingestor.search_entity(host_id, "host", max_results=100)
-            except Exception as e:
-                logger.debug(f"Log search for host {host_id} error: {e}")
-
-        host_lower = host_id.lower()
-        has_linux_audit = bool(host_logs.get("audit"))
-        has_auth_syslog = bool(host_logs.get("auth"))
-        
-        is_linux = (
-            has_linux_audit or 
-            has_auth_syslog or 
-            any(k in host_lower for k in ("linux", "nix", "srv", "ubuntu", "debian", "centos", "inetfw", "share")) or
-            any("/etc/" in str(e.get("action", "")) or "/var/" in str(e.get("action", "")) or "syscall=" in str(e.get("action", "")) for e in all_host_events)
-        )
-        
-        is_server = any(k in host_lower for k in ("srv", "share", "db", "web", "fw", "gw", "inetfw", "nas")) or bool(host_logs.get("audit"))
-
-        if is_linux:
-            detected_os = "Linux (Ubuntu 22.04 LTS / Server)" if is_server else "Linux (Ubuntu Desktop)"
-            detected_os_ver = "22.04 LTS"
-            domain = "company.internal"
-            edr = "Wazuh Agent / Linux Auditd"
-        else:
-            detected_os = "Windows Server 2022" if is_server else "Windows 11 Enterprise"
-            detected_os_ver = "22H2"
-            domain = "company.local"
-            edr = "CrowdStrike Falcon"
-
-        event_risks = [e.get("risk_score", 0.1) for e in all_host_events]
-        wazuh_risks = [e.get("risk_score", 0.1) for e in host_logs.get("wazuh", [])]
-        max_risk = max(event_risks + wazuh_risks, default=0.15)
-        
-        high_severity_alerts = sum(1 for r in (event_risks + wazuh_risks) if r >= 0.7)
-        vulnerability_count = len(host_logs.get("wazuh", []))
-        
-        last_malware = None
-        if max_risk >= 0.7:
-            for e in all_host_events:
-                if e.get("risk_score", 0) >= 0.7:
-                    last_malware = e.get("timestamp") or e.get("action")
-                    break
-
-        return {
-            'enrichment_data': {
-                'os': detected_os,
-                'os_version': detected_os_ver,
-                'domain': domain,
-                'is_server': is_server,
-                'endpoint_protection': edr,
-                'last_seen': all_host_events[0].get("timestamp") if all_host_events else (datetime.utcnow().isoformat() + 'Z'),
-                'security_posture': 'degraded' if high_severity_alerts > 0 else 'monitored',
-                'running_processes': len(host_logs.get("audit", [])) or 84,
-                'disk_usage': '68%',
-                'memory_usage': '54%',
-            },
-            'threat_intel': {
-                'last_malware_detection': last_malware,
-                'vulnerability_count': vulnerability_count,
-                'failed_patches': high_severity_alerts,
-                'high_severity_events': high_severity_alerts,
-            },
-            'risk_score': round(max_risk, 2),
-        }
+    async def collect(self, host_id: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        return await EvidenceSkillExecutor.execute_skill("persistence-auditor", host_id, "host", context)
 
 
 class ProcessEvidenceCollector(EvidenceCollector):
-    """Collect process-related evidence."""
+    """Collect process-related evidence via edr-process-tree skill."""
     
     def __init__(self):
         super().__init__(EntityType.PROCESS)
     
-    async def collect(self, process_id: str,
-                     context: Dict[str, Any]) -> Dict[str, Any]:
-        """Collect process details, parents, and behavior from telemetry."""
-        db_record = self._fetch_from_db(process_id)
-        if db_record:
-            return db_record
-
-        # Check telemetry from LogIngestor
-        ingestor = self._get_ingestor()
-        process_events = []
-        if ingestor:
-            try:
-                process_events = ingestor.get_process_tree_from_audit(process_id) or ingestor.search_entity(process_id, "process", max_results=50)
-            except Exception as e:
-                logger.debug(f"Log search for process {process_id} error: {e}")
-
-        proc_lower = process_id.lower()
-        exec_cmds = []
-        for e in process_events:
-            meta = e.get("metadata", {})
-            if meta.get("execve_args"):
-                exec_cmds.append(" ".join(meta["execve_args"]))
-            elif e.get("action"):
-                exec_cmds.append(e.get("action"))
-
-        suspicious_keywords = (
-            "donotcry", "wannacry", "ransom", "mimikatz", "c2", "install.sh",
-            "curl", "wget", "nc ", "ncat", "bash -c", "chmod +x", "encrypt",
-            "/tmp/", "/dev/shm", "backdoor", "miner", "xmrig"
-        )
-        is_known_threat = any(k in proc_lower for k in suspicious_keywords) or any(any(k in cmd.lower() for k in suspicious_keywords) for cmd in exec_cmds)
-        
-        is_system_daemon = any(d in proc_lower for d in ("systemd", "sshd", "cron", "rsyslog", "auditd", "dbus", "kworker", "init"))
-
-        if is_known_threat:
-            signature_status = "unsigned"
-            signer = "Untrusted / Unknown Binary"
-            known_malware = True
-            suspicious_imports = True
-            risk = 0.95
-        elif is_system_daemon:
-            signature_status = "signed"
-            signer = "Linux Core OS Vendor"
-            known_malware = False
-            suspicious_imports = False
-            risk = 0.05
-        else:
-            event_risks = [e.get("risk_score", 0.1) for e in process_events]
-            risk = max(event_risks, default=0.2)
-            signature_status = "unsigned" if risk >= 0.6 else "signed"
-            signer = "Third-Party Developer" if risk < 0.6 else "Unknown"
-            known_malware = risk >= 0.7
-            suspicious_imports = risk >= 0.6
-
-        return {
-            'enrichment_data': {
-                'signature_status': signature_status,
-                'signer': signer,
-                'start_time': process_events[0].get("timestamp") if process_events else (datetime.utcnow().isoformat() + 'Z'),
-                'network_connections': 1 if is_known_threat else 0,
-                'file_handles': 48 if is_known_threat else 12,
-                'command_line': exec_cmds[0] if exec_cmds else f"./{process_id}",
-                'executables_observed': list(set([e.get("metadata", {}).get("exe") or process_id for e in process_events]))[:10],
-            },
-            'threat_intel': {
-                'known_malware': known_malware,
-                'unsigned': signature_status == "unsigned",
-                'suspicious_imports': suspicious_imports,
-                'api_hooks': is_known_threat,
-                'audit_events_count': len(process_events),
-            },
-            'risk_score': round(risk, 2),
-        }
+    async def collect(self, process_id: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        return await EvidenceSkillExecutor.execute_skill("edr-process-tree", process_id, "process", context)
 
 
 class IPAddressEvidenceCollector(EvidenceCollector):
-    """Collect IP address-related evidence."""
+    """Collect IP address-related evidence via network-flow-analyzer skill."""
     
     def __init__(self):
         super().__init__(EntityType.IP_ADDRESS)
     
-    async def collect(self, ip_address: str,
-                     context: Dict[str, Any]) -> Dict[str, Any]:
-        """Collect IP geolocation, reputation, and threat data dynamically."""
-        db_record = self._fetch_from_db(ip_address)
-        if db_record:
-            return db_record
-
-        # Check telemetry from LogIngestor
-        ingestor = self._get_ingestor()
-        network_flows = []
-        ip_events = []
-        if ingestor:
-            try:
-                network_flows = ingestor.get_network_flows_for_ip(ip_address)
-                ip_events = ingestor.search_entity(ip_address, "ip", max_results=100)
-            except Exception as e:
-                logger.debug(f"Log search for IP {ip_address} error: {e}")
-
-        is_private = self._is_private_ip(ip_address)
-        
-        suricata_alerts = []
-        for flow in network_flows:
-            meta = flow.get("metadata", {})
-            if meta.get("alert"):
-                suricata_alerts.append(meta["alert"])
-        for evt in ip_events:
-            if evt.get("source") == "suricata" and "alert" in evt.get("event_type", ""):
-                suricata_alerts.append(evt.get("action", ""))
-
-        observed_ports = set()
-        for flow in network_flows:
-            meta = flow.get("metadata", {})
-            if meta.get("dest_port"):
-                observed_ports.add(meta["dest_port"])
-            if meta.get("src_port"):
-                observed_ports.add(meta["src_port"])
-        if not observed_ports:
-            observed_ports = {80, 443}
-
-        c2_suspicious_ports = {8888, 4444, 1337, 4443, 6667, 8080, 9999}
-        has_c2_port = bool(observed_ports.intersection(c2_suspicious_ports))
-        
-        if is_private:
-            reputation = "internal_host"
-            malware_c2 = False
-            in_blocklist = False
-            ip_risk = 0.15 if not suricata_alerts else 0.75
-            geo = "Internal Subnet / Enterprise LAN"
-            isp = "Corporate Network"
-        else:
-            if suricata_alerts or has_c2_port:
-                reputation = "malicious_c2"
-                malware_c2 = True
-                in_blocklist = True
-                ip_risk = 0.92
-                geo = "Remote External Host (Unverified ASN)"
-                isp = "Bulletproof / External Hosting"
-            else:
-                reputation = "external_unclassified"
-                malware_c2 = False
-                in_blocklist = False
-                ip_risk = 0.25
-                geo = "Global Public Internet"
-                isp = "Public Cloud / ISP"
-
-        threat_list = [str(a) for a in suricata_alerts[:10]]
-        if has_c2_port and not is_private:
-            threat_list.append(f"Suspicious inbound/outbound connection on C2 port(s): {list(observed_ports.intersection(c2_suspicious_ports))}")
-
-        return {
-            'enrichment_data': {
-                'geolocation': geo,
-                'asn': 'AS-INTERNAL' if is_private else 'AS-EXTERNAL',
-                'isp': isp,
-                'observed_ports': sorted(list(observed_ports))[:10],
-                'observed_protocols': ['tcp', 'http', 'tls'] if not is_private else ['tcp', 'udp', 'smb'],
-                'is_internal': is_private,
-                'total_flows_observed': len(network_flows),
-            },
-            'threat_intel': {
-                'reputation': reputation,
-                'known_threats': threat_list,
-                'in_blocklist': in_blocklist,
-                'phishing_attempts': 0,
-                'malware_c2': malware_c2,
-                'suricata_alerts_count': len(suricata_alerts),
-            },
-            'risk_score': round(ip_risk, 2),
-        }
+    async def collect(self, ip_address: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        return await EvidenceSkillExecutor.execute_skill("network-flow-analyzer", ip_address, "ip", context)
 
 
 class DomainEvidenceCollector(EvidenceCollector):
-    """Collect domain-related evidence."""
+    """Collect domain-related evidence via threat-intel-lookup skill."""
     
     def __init__(self):
         super().__init__(EntityType.DOMAIN)
     
-    async def collect(self, domain: str,
-                     context: Dict[str, Any]) -> Dict[str, Any]:
-        """Collect domain registration, reputation, and threat data."""
-        db_record = self._fetch_from_db(domain)
-        if db_record:
-            return db_record
-
-        dom_lower = domain.lower()
-        is_internal = dom_lower.endswith((".local", ".internal", ".corp", ".lan")) or "company" in dom_lower
-        
-        suspicious_tlds = (".xyz", ".top", ".cc", ".tk", ".ru", ".buzz", ".work")
-        has_suspicious_tld = any(dom_lower.endswith(tld) for tld in suspicious_tlds)
-        
-        ingestor = self._get_ingestor()
-        dns_events = []
-        if ingestor:
-            try:
-                dns_events = ingestor.search_entity(domain, "domain", max_results=50)
-            except Exception as e:
-                logger.debug(f"Log search for domain {domain} error: {e}")
-
-        if is_internal:
-            reputation = "clean_internal"
-            risk = 0.05
-            malware_c2 = False
-        elif has_suspicious_tld or any(e.get("risk_score", 0) >= 0.7 for e in dns_events):
-            reputation = "malicious_dga_or_c2"
-            risk = 0.88
-            malware_c2 = True
-        else:
-            reputation = "clean"
-            risk = 0.15
-            malware_c2 = False
-
-        return {
-            'enrichment_data': {
-                'registrar': 'Internal DNS' if is_internal else 'GoDaddy / Namecheap',
-                'registration_date': '2020-01-01' if is_internal else '2024-01-15',
-                'expiration_date': '2030-01-01',
-                'is_internal': is_internal,
-                'dns_records': {
-                    'A': ['192.168.100.1'] if is_internal else ['93.184.216.34'],
-                    'TXT': ['v=spf1 include:_spf.company.com ~all'] if is_internal else [],
-                },
-            },
-            'threat_intel': {
-                'reputation': reputation,
-                'known_threats': [f"High risk DNS telemetry: {domain}"] if risk >= 0.7 else [],
-                'typosquatting': False,
-                'phishing_domain': risk >= 0.7,
-                'malware_c2': malware_c2,
-                'dns_queries_observed': len(dns_events),
-            },
-            'risk_score': round(risk, 2),
-        }
+    async def collect(self, domain: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        return await EvidenceSkillExecutor.execute_skill("threat-intel-lookup", domain, "domain", context)
 
 
 class FileEvidenceCollector(EvidenceCollector):
-    """Collect file-related evidence."""
+    """Collect file-related evidence via file-forensics skill."""
     
     def __init__(self):
         super().__init__(EntityType.FILE)
     
-    async def collect(self, file_path: str,
-                     context: Dict[str, Any]) -> Dict[str, Any]:
-        """Collect file metadata, hashes, and reputation with real DB check and telemetry."""
-        # 1. Real database query
-        db_record = self._fetch_from_db(file_path)
-        if db_record:
-            return db_record
+    async def collect(self, file_path: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        return await EvidenceSkillExecutor.execute_skill("file-forensics", file_path, "file", context)
 
-        # Check telemetry from LogIngestor
-        ingestor = self._get_ingestor()
-        file_events = []
-        if ingestor:
-            try:
-                file_events = ingestor.search_entity(file_path, "file", max_results=50)
-            except Exception as e:
-                logger.debug(f"Log search for file {file_path} error: {e}")
-
-        file_lower = file_path.lower()
-        
-        malicious_names = (
-            "donotcry", "wannacry", "ransom", "mimikatz", "install.sh", "payload",
-            "encryptor", "backdoor", "dropper", "nc", "exploit", "c2"
-        )
-        is_suspicious_name = any(k in file_lower for k in malicious_names)
-        
-        suspicious_paths = ("/tmp/", "/var/tmp/", "/dev/shm/", "appdata/local/temp")
-        is_temp_path = any(p in file_lower for p in suspicious_paths)
-        
-        is_system_path = any(file_lower.startswith(p) for p in ("/bin/", "/usr/bin/", "/sbin/", "/usr/sbin/", "c:\\windows\\system32"))
-
-        if file_lower.endswith(".sh"):
-            mime_type = "text/x-shellscript"
-        elif file_lower.endswith((".elf", ".bin", "")):
-            mime_type = "application/x-executable"
-        elif file_lower.endswith(".exe"):
-            mime_type = "application/x-msdownload"
-        elif file_lower.endswith((".py", ".pl", ".rb")):
-            mime_type = "text/x-script"
-        else:
-            mime_type = "application/octet-stream"
-
-        if is_suspicious_name or (is_temp_path and not is_system_path):
-            reputation = "malicious_untrusted"
-            known_malware = True
-            signed = False
-            signer = "Unsigned / Untrusted Binary"
-            detection_ratio = "58/72"
-            risk = 0.95
-        elif is_system_path:
-            reputation = "system_trusted"
-            known_malware = False
-            signed = True
-            signer = "Operating System Vendor"
-            detection_ratio = "0/72"
-            risk = 0.0
-        else:
-            event_risks = [e.get("risk_score", 0.1) for e in file_events]
-            risk = max(event_risks, default=0.2)
-            known_malware = risk >= 0.7
-            signed = risk < 0.6
-            signer = "Software Publisher" if signed else "Unsigned Binary"
-            detection_ratio = "34/72" if known_malware else "0/72"
-            reputation = "malicious" if known_malware else "clean"
-
-        return {
-            'enrichment_data': {
-                'size_bytes': 1048576 if known_malware else 524288,
-                'created_time': file_events[0].get("timestamp") if file_events else '2025-12-12T17:20:00Z',
-                'modified_time': file_events[0].get("timestamp") if file_events else '2025-12-12T17:20:00Z',
-                'owner': 'root' if '/tmp/' in file_lower or '/media/' in file_lower or 'linux' in file_lower else 'SYSTEM',
-                'mime_type': mime_type,
-                'file_path': file_path,
-                'is_executable': mime_type in ("text/x-shellscript", "application/x-executable", "application/x-msdownload"),
-            },
-            'threat_intel': {
-                'reputation': reputation,
-                'known_malware': known_malware,
-                'signed': signed,
-                'signer': signer,
-                'detection_ratio': detection_ratio,
-                'telemetry_events_count': len(file_events),
-            },
-            'risk_score': round(risk, 2),
-        }
 
 
 class EvidenceCollectorRegistry:

@@ -34,11 +34,18 @@ class SOCSkill:
     requires: Dict[str, Any] = field(default_factory=dict)
     body: str = ""  # Markdown body with execution/parsing instructions
     file_path: str = ""
+    mitre_attack: List[str] = field(default_factory=list)
+    mitre_f3: List[str] = field(default_factory=list)
+    nist_csf: List[str] = field(default_factory=list)
 
     def matches_attributes(self, requested: List[str]) -> List[str]:
         """Return which requested attributes/actions this skill can collect or perform."""
         available = set(self.collects + self.actions)
         return [attr for attr in requested if attr in available]
+
+    def matches_mitre(self, technique_id: str) -> bool:
+        """Check if skill is mapped to a given MITRE ATT&CK technique."""
+        return technique_id.upper() in [t.upper() for t in self.mitre_attack]
 
     def render_command(self, values: Dict[str, str], use_fallback: bool = False) -> str:
         """Render command template with placeholder values."""
@@ -58,8 +65,15 @@ class UniversalSkillRegistry:
         if base_services_dir is None:
             base_services_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.base_services_dir = base_services_dir
+        self.extra_skills_dirs: List[str] = []
         self._cache: Dict[str, List[SOCSkill]] = {}  # phase -> list of skills
         self._all_cache: Optional[List[SOCSkill]] = None
+
+    def add_skills_directory(self, directory: str):
+        """Add an external directory containing skills (e.g. from an imported library)."""
+        if os.path.isdir(directory) and directory not in self.extra_skills_dirs:
+            self.extra_skills_dirs.append(directory)
+            self.clear_cache()
 
     def load_phase_skills(self, phase: str) -> List[SOCSkill]:
         """Load all skills for a specific phase (e.g. 'triage', 'evidence', 'compression', 'discovery')."""
@@ -72,13 +86,16 @@ class UniversalSkillRegistry:
         return skills
 
     def load_all_skills(self) -> List[SOCSkill]:
-        """Load all skills across all phases."""
+        """Load all skills across all phases and external directories."""
         if self._all_cache is not None:
             return self._all_cache
 
         all_skills = []
         for phase in ["triage", "evidence", "compression", "discovery"]:
             all_skills.extend(self.load_phase_skills(phase))
+
+        for extra_dir in self.extra_skills_dirs:
+            all_skills.extend(self._load_from_dir(extra_dir, "external"))
 
         self._all_cache = all_skills
         return all_skills
@@ -100,6 +117,11 @@ class UniversalSkillRegistry:
                 matches.append(skill)
         return matches
 
+    def find_skills_for_mitre_technique(self, technique_id: str) -> List[SOCSkill]:
+        """Find all skills mapped to a specific MITRE ATT&CK technique."""
+        candidates = self.load_all_skills()
+        return [skill for skill in candidates if skill.matches_mitre(technique_id)]
+
     def clear_cache(self):
         """Clear cached skills."""
         self._cache.clear()
@@ -110,10 +132,9 @@ class UniversalSkillRegistry:
         if not os.path.isdir(skills_dir):
             return skills
 
-        for entry in os.listdir(skills_dir):
-            skill_dir = os.path.join(skills_dir, entry)
-            skill_file = os.path.join(skill_dir, "SKILL.md")
-            if os.path.isfile(skill_file):
+        for root, _, files in os.walk(skills_dir):
+            if "SKILL.md" in files:
+                skill_file = os.path.join(root, "SKILL.md")
                 skill = self._parse_skill_file(skill_file, default_phase)
                 if skill:
                     skills.append(skill)
@@ -149,6 +170,17 @@ class UniversalSkillRegistry:
         if isinstance(actions, str):
             actions = [actions]
 
+        # Parse frameworks
+        mitre_attack = meta.get("mitre_attack", [])
+        if isinstance(mitre_attack, str):
+            mitre_attack = [mitre_attack]
+        mitre_f3 = meta.get("mitre_f3", [])
+        if isinstance(mitre_f3, str):
+            mitre_f3 = [mitre_f3]
+        nist_csf = meta.get("nist_csf", [])
+        if isinstance(nist_csf, str):
+            nist_csf = [nist_csf]
+
         return SOCSkill(
             name=str(name),
             phase=str(meta.get("phase", default_phase)),
@@ -162,7 +194,10 @@ class UniversalSkillRegistry:
             platform=meta.get("platform"),
             requires=meta.get("requires", {}),
             body=body.strip(),
-            file_path=path
+            file_path=path,
+            mitre_attack=mitre_attack,
+            mitre_f3=mitre_f3,
+            nist_csf=nist_csf,
         )
 
     def _split_frontmatter(self, content: str) -> tuple:

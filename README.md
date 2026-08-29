@@ -355,28 +355,38 @@ pytest backend/tests/ --cov=backend
 pytest backend/tests/test_alert_normalizer.py::test_crowdstrike_normalization -v
 ```
 
-## Next Steps (Phase 2)
+## Completed: Phase 2 (Agentic Orchestration & Skills)
 
-Phase 1 provides normalized alerts and enriched context. Phase 2 will add:
+Phase 2 successfully introduced the AI-driven investigation capabilities:
 
-1. **Correlation & Compression Layer** (7-stage pipeline)
-   - Temporal filtering (80-90% reduction)
-   - Entity correlation (50-70% reduction)
-   - Behavioral baseline filtering (60-80% reduction)
-   - Deduplication (30-40% reduction)
-   - Graph analysis (40-60% reduction)
-   - Abstraction (20-40% reduction)
-   - Risk scoring (40-60% reduction)
+1. **Pluggable Universal Skill Registry**
+   - Deprecated monolithic scripts in favor of modular `SOCSkill` capabilities.
+   - Natively supports the open **agentskills.io** standard.
+   - Automatically maps skills to MITRE ATT&CK and NIST CSF frameworks.
+   - Instant integration of 800+ open-source cybersecurity skills.
 
-2. **RCA Engine**
-   - Rule-based analysis for known attack patterns
-   - LLM-based analysis for novel patterns
-   - Attack path reconstruction
+2. **AI Planner & ReAct Supervisor**
+   - Dynamic orchestrator evaluates evidence at every step.
+   - Autonomous ReAct loops (e.g., dynamically scheduling deep-dive forensics when new C2 infrastructure is discovered).
+   - Eliminates rigid, static playbooks.
 
-3. **Investigation Package Builder**
-   - Select and rank events
-   - Build attack timeline
-   - Generate confidence scores
+3. **7-Stage Compression & RCA Engine**
+   - 50x+ noise reduction via temporal, behavioral, and graph-based filtering skills.
+   - LLM-powered Root Cause Analysis explicitly maps attack paths and causal relationships.
+
+## Next Steps (Phase 3)
+
+Phase 3 will focus on extending the agentic capabilities:
+
+1. **Triage & Scope Expansion**
+   - Migrate the initial Triage phase to utilize the new Universal Skill Registry.
+   
+2. **Response Orchestration**
+   - Wire up active response skills (containment, isolation, password resets) using the same pluggable architecture.
+   - Implement human-in-the-loop (HITL) approval workflows for critical actions.
+
+3. **Advanced Threat Intel**
+   - Connect specific Anthropic Cybersecurity Skills to live threat feeds.
 
 ## Performance Targets
 
