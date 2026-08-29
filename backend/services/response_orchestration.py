@@ -194,34 +194,17 @@ class ResponseOrchestrator:
             }
     
     async def _execute_by_type(self, action: Any, action_id: str) -> Dict[str, Any]:
-        """Execute action based on type."""
-        
-        from backend.services.rca_engine import ResponseAction
+        """Execute action based on type via ResponseSkillExecutor."""
+        from backend.services.response.skill_handlers import ResponseSkillExecutor
         
         start_time = datetime.now()
+        action_name = action.action.value if hasattr(action.action, "value") else str(action.action)
         
-        if action.action == ResponseAction.ISOLATE_HOST:
-            result = await self._isolate_host(action.target)
-        elif action.action == ResponseAction.RESET_CREDENTIALS:
-            result = await self._reset_credentials(action.target)
-        elif action.action == ResponseAction.BLOCK_IP:
-            result = await self._block_ip(action.target)
-        elif action.action == ResponseAction.BLOCK_DOMAIN:
-            result = await self._block_domain(action.target)
-        elif action.action == ResponseAction.KILL_PROCESS:
-            result = await self._kill_process(action.target)
-        elif action.action == ResponseAction.REVOKE_MFA:
-            result = await self._revoke_mfa(action.target)
-        elif action.action == ResponseAction.DISABLE_ACCOUNT:
-            result = await self._disable_account(action.target)
-        elif action.action == ResponseAction.PATCH_SYSTEM:
-            result = await self._patch_system(action.target)
-        elif action.action == ResponseAction.ENABLE_MFA:
-            result = await self._enable_mfa(action.target)
-        elif action.action == ResponseAction.UPDATE_FIREWALL:
-            result = await self._update_firewall(action.target)
-        else:
-            result = {'success': False, 'error': 'Unknown action type'}
+        result = await ResponseSkillExecutor.execute_skill(
+            skill_name=action_name,
+            target=action.target,
+            parameters={"description": getattr(action, "description", ""), "priority": getattr(action, "priority", "")}
+        )
         
         end_time = datetime.now()
         result['duration'] = (end_time - start_time).total_seconds()

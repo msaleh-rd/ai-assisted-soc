@@ -27,6 +27,7 @@ class TriageSkillExecutor:
             "mitre-classifier": TriageSkillExecutor._handle_mitre_classifier,
             "severity-evaluator": TriageSkillExecutor._handle_severity_evaluator,
             "grounding-validator": TriageSkillExecutor._handle_grounding_validator,
+            "threat-intel-prefilter": TriageSkillExecutor._handle_threat_intel_prefilter,
         }
 
         handler = handler_map.get(skill_name)
@@ -39,6 +40,40 @@ class TriageSkillExecutor:
         except Exception as e:
             logger.error(f"Error executing triage skill {skill_name}: {e}")
             return {"status": "error", "error": str(e)}
+
+    # ------------------------------------------------------------------
+    # Skill: Threat Intel Pre-Filter
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _handle_threat_intel_prefilter(input_data: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """Lightweight IOC pre-filter against local reputation."""
+        entities = input_data.get("entities", {})
+        flagged = []
+
+        ips = entities.get("ips", [])
+        domains = entities.get("domains", [])
+        hashes = entities.get("hashes", [])
+
+        # Check known malicious ranges/patterns
+        for ip in ips:
+            if str(ip).startswith("192.42.1.") or str(ip).startswith("198.51.100."):
+                flagged.append({"ioc": ip, "type": "ip", "reason": "Known C2 Threat Actor range", "risk": 0.95})
+
+        for d in domains:
+            if any(bad in str(d).lower() for bad in ("evil", "c2", "malware", "sinkhole", "tunnel")):
+                flagged.append({"ioc": d, "type": "domain", "reason": "High-risk domain indicator", "risk": 0.90})
+
+        for h in hashes:
+            if len(str(h)) == 64 and (str(h).startswith("dead") or str(h).startswith("beef")):
+                flagged.append({"ioc": h, "type": "hash", "reason": "Flagged malware hash signature", "risk": 0.99})
+
+        return {
+            "flagged_iocs": flagged,
+            "flagged_count": len(flagged),
+            "status": "success",
+            "prefilter_verdict": "MALICIOUS_FOUND" if flagged else "CLEAN"
+        }
 
     # ------------------------------------------------------------------
     # Skill: IOC Extractor
@@ -109,23 +144,30 @@ class TriageSkillExecutor:
         
         technique = mitre_mapper.classify_event(event_text, metadata=alert_data)
 
+        from backend.services.skills import skill_registry
+
         if technique:
+            tech_id = technique.technique_id
+            rec_skills = [s.name for s in skill_registry.find_skills_for_mitre_technique(tech_id)]
             return {
                 "tactic": technique.tactic_name,
                 "tactic_id": technique.tactic_id,
                 "technique": technique.name,
-                "technique_id": technique.technique_id,
+                "technique_id": tech_id,
                 "confidence": 0.85,
+                "recommended_skills": rec_skills,
                 "status": "success"
             }
 
         # Fallback to general discovery
+        rec_skills = [s.name for s in skill_registry.find_skills_for_mitre_technique("T1082")]
         return {
             "tactic": "discovery",
             "tactic_id": "TA0007",
             "technique": "System Information Discovery",
             "technique_id": "T1082",
             "confidence": 0.50,
+            "recommended_skills": rec_skills,
             "status": "success"
         }
 

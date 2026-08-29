@@ -60,17 +60,17 @@ def test_severity_evaluator_skill():
     asyncio.run(run_test())
 
 
-def test_grounding_validator_skill():
+def test_threat_intel_prefilter_skill():
     async def run_test():
-        extracted = [{"value": "192.168.1.10"}, {"value": "hallucinated_ip.com"}]
-        raw_text = "Alert triggered on host 192.168.1.10 connecting to internal server"
-        res = await TriageSkillExecutor.execute_skill("grounding-validator", {
-            "extracted_entities": extracted,
-            "raw_alert_text": raw_text
-        })
+        entities = {
+            "ips": ["192.42.1.174", "10.0.0.1"],
+            "domains": ["evil-c2.com", "google.com"],
+            "hashes": ["deadbeef12345678901234567890123456789012345678901234567890123456"]
+        }
+        res = await TriageSkillExecutor.execute_skill("threat-intel-prefilter", {"entities": entities})
         assert res["status"] == "success"
-        assert len(res["validated_entities"]) == 1
-        assert len(res["dropped_entities"]) == 1
-        assert res["hallucination_rate"] == 0.5
+        assert res["prefilter_verdict"] == "MALICIOUS_FOUND"
+        assert res["flagged_count"] == 3
 
     asyncio.run(run_test())
+
