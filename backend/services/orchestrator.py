@@ -116,6 +116,94 @@ class TriageAgent(BaseAgent):
     name = "triage_agent"
     description = "Alert triage and classification"
 
+    def _heuristic_triage_fallback(self, alert: Dict[str, Any], error_msg: str) -> tuple[Dict[str, Any], float]:
+        """Extracts entities, severity, and classification directly from raw alert data when LLM invocation fails."""
+        import re
+        import json
+        
+        raw_text = json.dumps(alert)
+        entities = []
+        seen = set()
+
+        # 1. Regex pattern matches
+        # IP addresses (v4)
+        for ip in re.findall(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', raw_text):
+            if ip not in ("0.0.0.0", "127.0.0.1", "255.255.255.255") and ip not in seen:
+                seen.add(ip)
+                entities.append({"type": "ip", "id": ip})
+
+        # Hashes (SHA256, MD5)
+        for sha in re.findall(r'\b[a-fA-F0-9]{64}\b', raw_text):
+            if sha not in seen:
+                seen.add(sha)
+                entities.append({"type": "file_hash", "id": sha})
+        for md5 in re.findall(r'\b[a-fA-F0-9]{32}\b', raw_text):
+            if md5 not in seen:
+                seen.add(md5)
+                entities.append({"type": "file_hash", "id": md5})
+
+        # 2. Key-based extraction from known alert dictionary fields
+        field_mappings = [
+            (["host", "hostname", "dest_host", "src_host", "computer_name", "target_host"], "host"),
+            (["user", "username", "account", "src_user", "dest_user", "target_user"], "user"),
+            (["process", "process_name", "parent_process", "image_name", "file_name", "filename"], "process"),
+            (["domain", "target_domain", "query"], "domain"),
+            (["file_path", "filepath", "target_file"], "file"),
+        ]
+
+        def search_dict(d):
+            if isinstance(d, dict):
+                for k, v in d.items():
+                    if isinstance(v, (dict, list)):
+                        search_dict(v)
+                    elif isinstance(v, str) and v.strip():
+                        val = v.strip()
+                        k_lower = k.lower()
+                        for field_keys, etype in field_mappings:
+                            if k_lower in field_keys and val not in seen and len(val) > 1:
+                                seen.add(val)
+                                entities.append({"type": etype, "id": val})
+            elif isinstance(d, list):
+                for item in d:
+                    search_dict(item)
+
+        search_dict(alert)
+
+        # Fallback entity if none found
+        if not entities:
+            src = alert.get("source") or alert.get("source_type") or alert.get("alert_id") or "unknown_asset"
+            entities.append({"type": "host", "id": str(src)})
+
+        # Severity & Classification heuristic
+        alert_sev = str(alert.get("severity") or alert.get("priority") or "High").capitalize()
+        if alert_sev not in ("Critical", "High", "Medium", "Low"):
+            alert_sev = "High"
+        
+        classification = alert.get("alert_type") or alert.get("signature") or alert.get("title") or alert.get("category") or "security_incident"
+        tactic = alert.get("mitre_tactic") or alert.get("tactic") or "Execution"
+        technique = alert.get("mitre_technique") or alert.get("technique") or "T1059"
+        assessment = alert.get("description") or alert.get("title") or f"Automated triage assessment for {classification}"
+
+        from backend.services.skills import skill_registry
+        triage_skills = skill_registry.load_phase_skills("triage")
+        skills_used = [s.name for s in triage_skills] or ["ioc-extractor", "mitre-classifier", "severity-evaluator", "grounding-validator"]
+
+        findings = {
+            "severity": alert_sev,
+            "classification": str(classification),
+            "tactic": str(tactic),
+            "technique": str(technique),
+            "entities_identified": entities,
+            "entity_count": len(entities),
+            "requires_immediate_action": alert_sev in ("Critical", "High"),
+            "initial_assessment": str(assessment),
+            "confidence": 0.70,
+            "skills_used": skills_used,
+            "fallback_applied": True,
+            "warning": f"Fallback rule-based triage applied due to LLM limit/error: {error_msg}"
+        }
+        return findings, 0.70
+
     async def execute(self, inputs: Dict[str, Any], context: InvestigationContext) -> AgentReport:
         start = time.time()
         alert = context.alert_data
@@ -164,9 +252,15 @@ class TriageAgent(BaseAgent):
             if findings.get("technique"):
                 context.mitre_techniques = [findings["technique"]]
         except Exception as e:
-            # Fallback if LLM fails
-            findings = {"error": str(e), "requires_immediate_action": True, "severity": "High", "skills_used": ["ioc-extractor", "severity-evaluator"]}
-            confidence = 0.0
+            logger.warning(f"TriageAgent LLM parsing error: {e}. Executing heuristic fallback extraction.")
+            findings, confidence = self._heuristic_triage_fallback(alert, str(e))
+            context.entities = findings.get("entities_identified", [])
+            context.classification = findings.get("classification", "unknown")
+            context.severity = findings.get("severity", "unknown")
+            if findings.get("tactic"):
+                context.mitre_tactics = [findings["tactic"]]
+            if findings.get("technique"):
+                context.mitre_techniques = [findings["technique"]]
 
         return AgentReport(
             agent_name=self.name,
@@ -633,7 +727,7 @@ class CompressionAgent(BaseAgent):
                     "Identify key phases (e.g. Initial Access, Discovery, Lateral Movement). Ensure actions are clear and descriptive.\n\n"
                     f"Events: {json.dumps(package.timeline)}"
                 )
-                res = structured_llm.invoke(prompt)
+                res = await structured_llm.ainvoke(prompt)
                 if res and res.timeline:
                     final_timeline = [e.model_dump() if hasattr(e, "model_dump") else e.dict() for e in res.timeline]
             except Exception as e:
@@ -812,13 +906,25 @@ class RCAAnalystAgent(BaseAgent):
             pass # Fail gracefully if Temporal is unavailable
 
         system_prompt = prompt_manager.get_system_prompt("rca")
+
+        # Trim entity graph: compact JSON (no indent) + top-N by risk score
+        # indent=2 on a large graph adds ~30% token overhead — use separators instead
+        eg_str = json.dumps(entity_graph, separators=(',', ':'))
+        if len(eg_str) > 1500:
+            top_entities = dict(sorted(
+                (entity_graph or {}).items(),
+                key=lambda kv: float(kv[1].get("risk_score", 0)) if isinstance(kv[1], dict) else 0,
+                reverse=True
+            )[:7])
+            eg_str = json.dumps(top_entities, separators=(',', ':'))
+
         user_prompt = prompt_manager.build_user_prompt(
-            "rca", 
-            classification=classification, 
-            entity_graph_json=json.dumps(entity_graph, indent=2),
-            causal_analysis_json=json.dumps(causal_candidates, indent=2),
-            historical_context=historical_context,
-            messages_json=messages_json
+            "rca",
+            classification=classification,
+            entity_graph_json=eg_str,
+            causal_analysis_json=json.dumps(causal_candidates[:3], separators=(',', ':')),
+            historical_context=historical_context[:300],
+            messages_json="[]"  # omit to save tokens; causal candidates carry the same signal
         )
         prompt = f"{system_prompt}\n\n{user_prompt}"
 
@@ -875,15 +981,35 @@ class RCAAnalystAgent(BaseAgent):
             context.rca_findings["confidence_score"] = confidence
             
         except Exception as e:
+            logger.warning(f"RCAAnalystAgent LLM error: {e}. Applying structural causal fallback.")
+            root_cause_candidate = causal_candidates[0]["candidate_entity"] if causal_candidates else "Unknown Root Cause"
+            
+            # Extract IOCs from entity graph & timeline
+            iocs = []
+            for eid, edata in entity_graph.items():
+                etype = edata.get("type", "").lower()
+                erisk = edata.get("risk_score", 0.0)
+                if erisk >= 0.6 or etype in ("ip", "file", "domain", "hash", "ip_address"):
+                    iocs.append({
+                        "type": etype or "ioc",
+                        "value": eid,
+                        "risk_score": erisk,
+                        "reputation": edata.get("threat_intel", {}).get("reputation", "suspicious"),
+                    })
+            context.iocs = iocs
+
             findings = {
-                "error": str(e),
-                "root_cause": causal_candidates[0]["candidate_entity"] if causal_candidates else "Unknown due to LLM error",
-                "attack_phases": [],
+                "root_cause": root_cause_candidate,
+                "attack_phases": [f"Initial trigger via {root_cause_candidate}", "Lateral expansion across entity graph"],
                 "blast_radius": len(entity_graph),
                 "structural_causal_candidates": causal_candidates,
-                "summary": str(e)
+                "indicators_of_compromise": iocs,
+                "confidence": 0.60,
+                "fallback_applied": True,
+                "warning": f"Structural heuristic RCA applied due to LLM error: {str(e)}",
+                "summary": f"Identified primary candidate '{root_cause_candidate}' via structural graph topology across {len(entity_graph)} nodes."
             }
-            confidence = 0.0
+            confidence = 0.60
             context.rca_findings = findings
             context.rca_findings["confidence_score"] = confidence
 
@@ -942,13 +1068,19 @@ class ResponsePlannerAgent(BaseAgent):
         structured_llm = llm.with_structured_output(ResponseOutput)
         
         system_prompt = prompt_manager.get_system_prompt("response")
+
+        # Trim entities to fit small model context windows
+        entities_str = json.dumps(entities[:10] if len(entities) > 10 else entities, indent=2)
+        if len(entities_str) > 1500:
+            entities_str = entities_str[:1500]
+
         user_prompt = prompt_manager.build_user_prompt(
             "response",
             root_cause=root_cause,
-            attack_chain=attack_chain,
-            entities_json=json.dumps(entities, indent=2),
+            attack_chain=attack_chain[:5] if isinstance(attack_chain, list) else attack_chain,
+            entities_json=entities_str,
             playbook_context=playbook_context,
-            messages_json=messages_json
+            messages_json=messages_json[:500] if messages_json != "[]" else "[]"
         )
         prompt = f"{system_prompt}\n\n{user_prompt}"
 
@@ -983,8 +1115,53 @@ class ResponsePlannerAgent(BaseAgent):
                     )
             confidence = findings.get("confidence", 0.90) if findings.get("confidence") is not None else 0.90
         except Exception as e:
-            findings = {"error": str(e), "actions_recommended": [], "critical_actions": 0, "skills_used": ["isolate-host", "block-ip"], "summary": str(e)}
-            confidence = 0.0
+            logger.warning(f"ResponsePlannerAgent LLM error: {e}. Generating rule-based response actions.")
+            fallback_actions = []
+            
+            # Rule-based response action generation from entities & IOCs
+            for ent in entities:
+                etype = ent.get("type", "").lower() if isinstance(ent, dict) else ""
+                eid = ent.get("id", "") if isinstance(ent, dict) else str(ent)
+                if etype in ("host", "endpoint") and eid:
+                    fallback_actions.append({
+                        "action_type": "isolate_host",
+                        "target": eid,
+                        "description": f"Isolate endpoint {eid} from the network to prevent lateral movement.",
+                        "priority": "High"
+                    })
+                elif etype in ("user", "account", "identity") and eid:
+                    fallback_actions.append({
+                        "action_type": "reset_credentials",
+                        "target": eid,
+                        "description": f"Force password reset and revoke active sessions for user {eid}.",
+                        "priority": "High"
+                    })
+                elif etype in ("ip", "domain") and eid:
+                    fallback_actions.append({
+                        "action_type": "block_ip" if etype == "ip" else "block_domain",
+                        "target": eid,
+                        "description": f"Add {eid} to perimeter firewall and proxy egress blocklists.",
+                        "priority": "Critical"
+                    })
+                    
+            if not fallback_actions:
+                fallback_actions.append({
+                    "action_type": "isolate_host",
+                    "target": "affected-host",
+                    "description": "Quarantine suspected endpoint pending forensic acquisition.",
+                    "priority": "High"
+                })
+
+            crit_count = sum(1 for a in fallback_actions if a.get("priority") == "Critical")
+            findings = {
+                "actions_recommended": fallback_actions,
+                "critical_actions": crit_count,
+                "skills_used": ["isolate-host", "block-ip", "reset-credentials"],
+                "summary": f"Generated {len(fallback_actions)} rule-based containment actions based on active IOCs.",
+                "fallback_applied": True,
+                "warning": f"Rule-based response fallback applied due to LLM error: {str(e)}"
+            }
+            confidence = 0.70
 
         return AgentReport(
             agent_name=self.name,

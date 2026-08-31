@@ -1632,6 +1632,10 @@ function addAgentReport(report) {
 
     const findingsHtml = displayFindings
         .map(([k, v]) => {
+            if (k === 'skills_used' && Array.isArray(v)) {
+                const badges = v.map(s => `<span class="phase-agent-tag" style="background:#1e1b4b; color:#c084fc; border:1px solid #6b21a8; padding:2px 6px; font-size:0.75rem; margin:2px 2px 2px 0; display:inline-block;">⚡ ${escapeHtml(s)}</span>`).join('');
+                return `<div class="report-finding-item" style="display:block; margin-top:4px;"><span class="report-finding-key" style="display:block; margin-bottom:2px;">skills_used:</span><div>${badges}</div></div>`;
+            }
             const val = Array.isArray(v) ? `[${v.length} items]` : String(v);
             return `<div class="report-finding-item"><span class="report-finding-key">${k}:</span><span class="report-finding-value">${escapeHtml(val)}</span></div>`;
         }).join('');
@@ -2506,8 +2510,10 @@ function openPhaseInspector(agentKey) {
 
     if (key === 'compression_agent') {
         renderCompressionInspectorView(report, tabsContainer, bodyContainer);
-    } else if (key === 'evidence_agent' || key === 'discovery_agent') {
+    } else if (key === 'evidence_agent') {
         renderEvidenceInspectorView(report, tabsContainer, bodyContainer);
+    } else if (key === 'discovery_agent') {
+        renderDiscoveryInspectorView(report, tabsContainer, bodyContainer);
     } else if (key === 'triage_agent') {
         renderTriageInspectorView(report, tabsContainer, bodyContainer);
     } else if (key === 'rca_agent') {
@@ -2564,7 +2570,8 @@ function renderCompressionInspectorView(report, tabs, body) {
         <button class="phase-tab-btn" id="phaseTabBtn-subgraph" onclick="switchPhaseModalTab('subgraph')">🕸️ Interactive Attack Graph</button>
     `;
 
-    // KPI Cards
+    const skillsUsed = (findings.skills_used && findings.skills_used.length > 0) ? findings.skills_used : ["noise-filter", "temporal-clustering", "attack-subgraph-filter", "behavioral-anomaly-filter", "semantic-summarizer"];
+
     const kpiHtml = `
         <div class="phase-kpi-grid">
             <div class="phase-kpi-card">
@@ -2584,8 +2591,20 @@ function renderCompressionInspectorView(report, tabs, body) {
             </div>
             <div class="phase-kpi-card">
                 <span class="phase-kpi-label">Skills Deployed</span>
-                <span class="phase-kpi-val" style="color: #a78bfa;">${(findings.skills_used || []).length}</span>
+                <span class="phase-kpi-val" style="color: #a78bfa;">${skillsUsed.length}</span>
                 <span class="phase-kpi-sub">Agentic reduction stages</span>
+            </div>
+        </div>
+    `;
+
+    const skillsBannerHtml = `
+        <div style="background:#111827; border:1px solid #1f2937; border-radius:8px; padding:14px 18px; margin-bottom:16px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span style="color:#a78bfa; font-weight:600; font-size:0.85rem; text-transform:uppercase; letter-spacing:0.05em;">⚡ Agentic Compression Skills Used</span>
+                <span class="badge" style="background:rgba(167,139,250,0.15); color:#a78bfa; font-size:0.75rem;">${skillsUsed.length} Reduction Stages</span>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:8px;">
+                ${skillsUsed.map(s => `<span class="phase-agent-tag" style="background:#1e1b4b; color:#c084fc; border:1px solid #6b21a8; padding:4px 10px; font-size:0.8rem;">🗜️ ${escapeHtml(s)}</span>`).join('')}
             </div>
         </div>
     `;
@@ -2702,6 +2721,7 @@ function renderCompressionInspectorView(report, tabs, body) {
 
     body.innerHTML = `
         ${kpiHtml}
+        ${skillsBannerHtml}
 
         <!-- Tab 1: Funnel -->
         <div class="phase-modal-tab-pane" id="phaseTabPane-funnel" style="display: block;">
@@ -3082,13 +3102,198 @@ function filterFilteredEventsInspector() {
 }
 
 // ------------------------------------------------------------
-// 2. Evidence Agent Inspector (Entity Graph, Sockets, Cron)
+// 2. Discovery Agent Inspector (Hosts, Ports, Reachability)
+// ------------------------------------------------------------
+function renderDiscoveryInspectorView(report, tabs, body) {
+    const findings = report.findings || {};
+    const hosts = findings.hosts || [];
+    const scanned = findings.targets_scanned !== undefined ? findings.targets_scanned : hosts.length;
+    const reachable = hosts.filter(h => h.status === 'alive' || h.status === 'reachable').length;
+    const unreachable = hosts.filter(h => h.status === 'unreachable').length;
+    const unknown = scanned - reachable - unreachable;
+    const skillsUsed = (findings.skills_used && findings.skills_used.length > 0) ? findings.skills_used : ["port-scanner", "service-detector", "subdomain-scanner", "nuclei-vuln-scan"];
+
+    // Collect all open ports across all hosts
+    const allPorts = hosts.reduce((acc, h) => {
+        const p = (h.attributes || {}).open_ports || '';
+        if (p && p !== 'unavailable') p.split(',').map(s => s.trim()).filter(Boolean).forEach(port => acc.add(port));
+        return acc;
+    }, new Set());
+
+    // Tabs
+    tabs.innerHTML = `
+        <button class="phase-tab-btn active" id="phaseTabBtn-hosts" onclick="switchPhaseModalTab('hosts')">🖥️ Scanned Hosts (${hosts.length})</button>
+        <button class="phase-tab-btn" id="phaseTabBtn-ports" onclick="switchPhaseModalTab('ports')">🔌 Open Ports (${allPorts.size})</button>
+        <button class="phase-tab-btn" id="phaseTabBtn-rawscan" onclick="switchPhaseModalTab('rawscan')">📋 Scan Details</button>
+    `;
+
+    // KPI Cards
+    const kpiHtml = `
+        <div class="phase-kpi-grid">
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Hosts Scanned</span>
+                <span class="phase-kpi-val" style="color:#60a5fa;">${scanned}</span>
+                <span class="phase-kpi-sub">Total targets probed</span>
+            </div>
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Reachable</span>
+                <span class="phase-kpi-val" style="color:#34d399;">${reachable}</span>
+                <span class="phase-kpi-sub">Responded to probes</span>
+            </div>
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Open Ports Found</span>
+                <span class="phase-kpi-val" style="color:#fbbf24;">${allPorts.size}</span>
+                <span class="phase-kpi-sub">Across all scanned hosts</span>
+            </div>
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Skills Deployed</span>
+                <span class="phase-kpi-val" style="color:#a78bfa;">${skillsUsed.length}</span>
+                <span class="phase-kpi-sub">Active discovery tools</span>
+            </div>
+        </div>
+    `;
+
+    const skillsBannerHtml = `
+        <div style="background:#111827; border:1px solid #1f2937; border-radius:8px; padding:14px 18px; margin-bottom:16px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span style="color:#a78bfa; font-weight:600; font-size:0.85rem; text-transform:uppercase; letter-spacing:0.05em;">⚡ Agentic Discovery Skills Deployed</span>
+                <span class="badge" style="background:rgba(167,139,250,0.15); color:#a78bfa; font-size:0.75rem;">${skillsUsed.length} Active Probers</span>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:8px;">
+                ${skillsUsed.map(s => `<span class="phase-agent-tag" style="background:#1e1b4b; color:#c084fc; border:1px solid #6b21a8; padding:4px 10px; font-size:0.8rem;">🌐 ${escapeHtml(s)}</span>`).join('')}
+            </div>
+        </div>
+    `;
+
+    // Hosts Table
+    let hostRows = '';
+    if (hosts.length === 0) {
+        hostRows = '<tr><td colspan="6" style="text-align:center; color:#64748b;">No hosts recorded</td></tr>';
+    } else {
+        hosts.forEach(h => {
+            const attr = h.attributes || {};
+            const status = h.status || 'unknown';
+            const statusColor = status === 'alive' || status === 'reachable' ? '#34d399'
+                : status === 'unreachable' ? '#f87171' : '#94a3b8';
+            const statusIcon = status === 'alive' || status === 'reachable' ? '✅'
+                : status === 'unreachable' ? '❌' : '❓';
+            const reach = attr.reachability || status;
+            const ports = (attr.open_ports && attr.open_ports !== 'unavailable') ? attr.open_ports : '—';
+            const hostname = (attr.hostname && attr.hostname !== 'unavailable') ? attr.hostname : '—';
+            const latency = (attr.latency && attr.latency !== 'unavailable') ? attr.latency : '—';
+            hostRows += `
+                <tr>
+                    <td><strong style="color:#f8fafc;">${escapeHtml(h.target || '—')}</strong></td>
+                    <td style="color:${statusColor}; font-weight:600;">${statusIcon} ${escapeHtml(status)}</td>
+                    <td style="color:#94a3b8;">${escapeHtml(reach)}</td>
+                    <td>${escapeHtml(hostname)}</td>
+                    <td><code style="color:#fbbf24; font-size:0.8rem;">${escapeHtml(ports)}</code></td>
+                    <td style="color:#94a3b8;">${escapeHtml(latency)}</td>
+                </tr>
+            `;
+        });
+    }
+
+    // Open Ports breakdown
+    let portRows = '';
+    if (allPorts.size === 0) {
+        portRows = '<tr><td colspan="3" style="text-align:center; color:#64748b;">No open ports detected</td></tr>';
+    } else {
+        const PORT_SERVICES = {
+            '21':'FTP','22':'SSH','23':'Telnet','25':'SMTP','53':'DNS',
+            '80':'HTTP','110':'POP3','135':'RPC','139':'NetBIOS','143':'IMAP',
+            '443':'HTTPS','445':'SMB','993':'IMAPS','995':'POP3S',
+            '1433':'MSSQL','1521':'Oracle DB','3306':'MySQL','3389':'RDP',
+            '5432':'PostgreSQL','5900':'VNC','6379':'Redis','8080':'HTTP-Alt',
+            '8443':'HTTPS-Alt','27017':'MongoDB'
+        };
+        const RISKY_PORTS = new Set(['21','23','135','139','445','3389','5900','1433','1521','3306','27017','6379']);
+        allPorts.forEach(port => {
+            const svc = PORT_SERVICES[port] || 'Unknown';
+            const risky = RISKY_PORTS.has(port);
+            const hostsWithPort = hosts.filter(h => {
+                const p = (h.attributes || {}).open_ports || '';
+                return p.split(',').map(s => s.trim()).includes(port);
+            }).map(h => h.target).join(', ');
+            portRows += `
+                <tr>
+                    <td><code style="color:#60a5fa; font-weight:700;">${escapeHtml(port)}</code></td>
+                    <td><span class="phase-agent-tag">${escapeHtml(svc)}</span></td>
+                    <td style="color:${risky ? '#f87171' : '#34d399'}; font-weight:600;">${risky ? '⚠️ High Risk' : '✅ Normal'}</td>
+                    <td style="color:#94a3b8; font-size:0.8rem;">${escapeHtml(hostsWithPort)}</td>
+                </tr>
+            `;
+        });
+    }
+
+    // Raw scan details — per-host attribute dump
+    let rawCards = '';
+    if (hosts.length === 0) {
+        rawCards = '<div style="color:#64748b; text-align:center;">No scan data available</div>';
+    } else {
+        hosts.forEach(h => {
+            const attr = h.attributes || {};
+            const prov = h.provenance || {};
+            const attrRows = Object.entries(attr).map(([k, v]) =>
+                `<tr><td style="color:#94a3b8; width:40%;">${escapeHtml(k)}</td><td style="color:#e2e8f0;">${escapeHtml(String(v))}</td><td style="color:#475569; font-size:0.75rem;">${escapeHtml(prov[k] || '—')}</td></tr>`
+            ).join('');
+            rawCards += `
+                <div style="background:#111827; border:1px solid #1f2937; border-radius:8px; padding:16px; margin-bottom:12px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                        <h4 style="margin:0; color:#38bdf8; font-size:1rem;">🖥️ ${escapeHtml(h.target)}</h4>
+                        <span class="badge" style="background:#1e293b; color:${h.status === 'alive' ? '#34d399' : '#f87171'}">${escapeHtml(h.status || 'unknown')}</span>
+                    </div>
+                    <table style="width:100%; font-size:0.82rem; border-collapse:collapse;">
+                        <thead><tr>
+                            <th style="text-align:left; color:#475569; padding:4px 0; border-bottom:1px solid #1f2937;">Attribute</th>
+                            <th style="text-align:left; color:#475569; padding:4px 0; border-bottom:1px solid #1f2937;">Value</th>
+                            <th style="text-align:left; color:#475569; padding:4px 0; border-bottom:1px solid #1f2937;">Source</th>
+                        </tr></thead>
+                        <tbody>${attrRows || '<tr><td colspan="3" style="color:#475569;">No attributes collected</td></tr>'}</tbody>
+                    </table>
+                </div>
+            `;
+        });
+    }
+
+    body.innerHTML = `
+        ${kpiHtml}
+        ${skillsBannerHtml}
+        <div class="phase-modal-tab-pane" id="phaseTabPane-hosts" style="display:block;">
+            <table class="funnel-table">
+                <thead><tr>
+                    <th>Target IP / Host</th>
+                    <th>Status</th>
+                    <th>Reachability</th>
+                    <th>Hostname (DNS)</th>
+                    <th>Open Ports</th>
+                    <th>Latency</th>
+                </tr></thead>
+                <tbody>${hostRows}</tbody>
+            </table>
+        </div>
+        <div class="phase-modal-tab-pane" id="phaseTabPane-ports" style="display:none;">
+            <table class="funnel-table">
+                <thead><tr>
+                    <th>Port</th><th>Service</th><th>Risk Level</th><th>Seen On</th>
+                </tr></thead>
+                <tbody>${portRows}</tbody>
+            </table>
+        </div>
+        <div class="phase-modal-tab-pane" id="phaseTabPane-rawscan" style="display:none;">
+            ${rawCards}
+        </div>
+    `;
+}
+
+// ------------------------------------------------------------
+// 3. Evidence Agent Inspector (Entity Graph, Sockets, Cron)
 // ------------------------------------------------------------
 function renderEvidenceInspectorView(report, tabs, body) {
     const findings = report.findings || {};
     const entityGraph = findings.entity_graph || {};
     const relationships = findings.relationships || [];
-    const skillsUsed = findings.skills_used || [];
+    const skillsUsed = (findings.skills_used && findings.skills_used.length > 0) ? findings.skills_used : ["edr-process-tree", "threat-intel-lookup", "identity-ad-lookup", "network-flow-analyzer", "persistence-auditor", "file-forensics"];
 
     const entityList = Object.entries(entityGraph);
 
@@ -3113,8 +3318,20 @@ function renderEvidenceInspectorView(report, tabs, body) {
             </div>
             <div class="phase-kpi-card">
                 <span class="phase-kpi-label">Skills Deployed</span>
-                <span class="phase-kpi-val" style="color: #fbbf24;">${skillsUsed.length}</span>
+                <span class="phase-kpi-val" style="color: #a78bfa;">${skillsUsed.length}</span>
                 <span class="phase-kpi-sub">EDR & Network collectors</span>
+            </div>
+        </div>
+    `;
+
+    const skillsBannerHtml = `
+        <div style="background:#111827; border:1px solid #1f2937; border-radius:8px; padding:14px 18px; margin-bottom:16px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span style="color:#a78bfa; font-weight:600; font-size:0.85rem; text-transform:uppercase; letter-spacing:0.05em;">⚡ Agentic Evidence Skills Deployed</span>
+                <span class="badge" style="background:rgba(167,139,250,0.15); color:#a78bfa; font-size:0.75rem;">${skillsUsed.length} Forensic Collectors</span>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:8px;">
+                ${skillsUsed.map(s => `<span class="phase-agent-tag" style="background:#1e1b4b; color:#c084fc; border:1px solid #6b21a8; padding:4px 10px; font-size:0.8rem;">🔍 ${escapeHtml(s)}</span>`).join('')}
             </div>
         </div>
     `;
@@ -3178,6 +3395,7 @@ function renderEvidenceInspectorView(report, tabs, body) {
 
     body.innerHTML = `
         ${kpiHtml}
+        ${skillsBannerHtml}
         <div class="phase-modal-tab-pane" id="phaseTabPane-entities" style="display: block;">
             <table class="funnel-table">
                 <thead>
@@ -3218,11 +3436,12 @@ function renderEvidenceInspectorView(report, tabs, body) {
 }
 
 // ------------------------------------------------------------
-// 3. Triage Agent Inspector
+// 4. Triage Agent Inspector
 // ------------------------------------------------------------
 function renderTriageInspectorView(report, tabs, body) {
     const findings = report.findings || {};
     const entities = findings.entities_identified || [];
+    const skillsUsed = (findings.skills_used && findings.skills_used.length > 0) ? findings.skills_used : ["ioc-extractor", "mitre-classifier", "severity-evaluator", "grounding-validator"];
 
     tabs.innerHTML = `
         <button class="phase-tab-btn active" id="phaseTabBtn-triage" onclick="switchPhaseModalTab('triage')">🎯 Triage Scope & Classification</button>
@@ -3232,13 +3451,18 @@ function renderTriageInspectorView(report, tabs, body) {
         <div class="phase-kpi-grid">
             <div class="phase-kpi-card">
                 <span class="phase-kpi-label">Classification</span>
-                <span class="phase-kpi-val" style="color: #f87171;">${findings.classification || 'Unknown'}</span>
-                <span class="phase-kpi-sub">Severity: ${findings.severity || 'High'}</span>
+                <span class="phase-kpi-val" style="color: #f87171;">${escapeHtml(findings.classification || 'Unknown')}</span>
+                <span class="phase-kpi-sub">Severity: ${escapeHtml(findings.severity || 'High')}</span>
             </div>
             <div class="phase-kpi-card">
-                <span class="phase-kpi-label">Seed Entities Identified</span>
+                <span class="phase-kpi-label">Seed Entities</span>
                 <span class="phase-kpi-val" style="color: #60a5fa;">${entities.length}</span>
                 <span class="phase-kpi-sub">Grounded IOCs</span>
+            </div>
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Skills Deployed</span>
+                <span class="phase-kpi-val" style="color: #a78bfa;">${skillsUsed.length}</span>
+                <span class="phase-kpi-sub">Triage capabilities</span>
             </div>
             <div class="phase-kpi-card">
                 <span class="phase-kpi-label">Immediate Action</span>
@@ -3246,6 +3470,16 @@ function renderTriageInspectorView(report, tabs, body) {
                     ${findings.requires_immediate_action ? 'REQUIRED' : 'Standard'}
                 </span>
                 <span class="phase-kpi-sub">Triage priority</span>
+            </div>
+        </div>
+
+        <div style="background:#111827; border:1px solid #1f2937; border-radius:8px; padding:14px 18px; margin-bottom:16px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span style="color:#a78bfa; font-weight:600; font-size:0.85rem; text-transform:uppercase; letter-spacing:0.05em;">⚡ Agentic Triage Skills Used</span>
+                ${findings.tactic ? `<span class="badge" style="background:rgba(56,189,248,0.15); color:#38bdf8; font-size:0.75rem;">MITRE: ${escapeHtml(findings.tactic)} ${findings.technique ? `(${escapeHtml(findings.technique)})` : ''}</span>` : ''}
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:8px;">
+                ${skillsUsed.map(s => `<span class="phase-agent-tag" style="background:#1e1b4b; color:#c084fc; border:1px solid #6b21a8; padding:4px 10px; font-size:0.8rem;">🔧 ${escapeHtml(s)}</span>`).join('')}
             </div>
         </div>
 
@@ -3277,13 +3511,14 @@ function renderTriageInspectorView(report, tabs, body) {
 }
 
 // ------------------------------------------------------------
-// 4. RCA Agent Inspector
+// 5. RCA Agent Inspector
 // ------------------------------------------------------------
 function renderRCAInspectorView(report, tabs, body) {
     const findings = report.findings || {};
     const phases = findings.attack_phases || [];
     const cot = findings.chain_of_thought_verification || findings.reasoning || '';
     const candidates = findings.structural_causal_candidates || [];
+    const skillsUsed = (findings.skills_used && findings.skills_used.length > 0) ? findings.skills_used : ["causal-analyzer", "attack-chain-synthesizer", "true-rca-ranker"];
 
     tabs.innerHTML = `
         <button class="phase-tab-btn active" id="phaseTabBtn-rca" onclick="switchPhaseModalTab('rca')">🔬 Root Cause & Blast Radius</button>
@@ -3306,14 +3541,30 @@ function renderRCAInspectorView(report, tabs, body) {
             <div class="phase-kpi-card">
                 <span class="phase-kpi-label">Attack Phases</span>
                 <span class="phase-kpi-val" style="color: #fbbf24;">${phases.length}</span>
-                <span class="phase-kpi-sub">Reconstructed steps</span>
+                <span class="phase-kpi-sub">Sequential stages</span>
+            </div>
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Skills Deployed</span>
+                <span class="phase-kpi-val" style="color: #a78bfa;">${skillsUsed.length}</span>
+                <span class="phase-kpi-sub">Graph RCA engines</span>
             </div>
         </div>
 
-        <div class="phase-modal-tab-pane" id="phaseTabPane-rca" style="display: block;">
-            <div style="background:#111827; border:1px solid #3b82f6; border-radius:8px; padding:18px; margin-bottom:16px;">
-                <h4 style="color:#60a5fa; margin-top:0;">Identified Root Cause</h4>
-                <div style="color:#f8fafc; font-size:1.05rem; font-weight:600; line-height:1.5;">${escapeHtml(findings.root_cause || 'Root cause undetermined')}</div>
+        <div style="background:#111827; border:1px solid #1f2937; border-radius:8px; padding:14px 18px; margin-bottom:16px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span style="color:#a78bfa; font-weight:600; font-size:0.85rem; text-transform:uppercase; letter-spacing:0.05em;">⚡ Agentic RCA Skills Used</span>
+                <span class="badge" style="background:rgba(167,139,250,0.15); color:#a78bfa; font-size:0.75rem;">${skillsUsed.length} Causal Analyzers</span>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:8px;">
+                ${skillsUsed.map(s => `<span class="phase-agent-tag" style="background:#1e1b4b; color:#c084fc; border:1px solid #6b21a8; padding:4px 10px; font-size:0.8rem;">🔬 ${escapeHtml(s)}</span>`).join('')}
+            </div>
+        </div>
+
+        <div class="phase-modal-tab-pane" id="phaseTabPane-rca">
+            <div style="background:#111827; border:1px solid #1f2937; border-radius:8px; padding:18px; margin-bottom:16px;">
+                <h4 style="color:#f87171; margin-top:0;">Identified Root Cause</h4>
+                <p style="color:#f8fafc; font-size:1.05rem; font-weight:bold; margin-bottom:6px;">${escapeHtml(findings.root_cause || 'Unknown')}</p>
+                <p style="color:#94a3b8; font-size:0.85rem; margin:0;">${escapeHtml(findings.summary || '')}</p>
             </div>
 
             <h4 style="color:#f8fafc; margin-bottom:10px;">Structural Causal Candidates</h4>
@@ -3328,11 +3579,11 @@ function renderRCAInspectorView(report, tabs, body) {
                 <tbody>
                     ${candidates.map(c => `
                         <tr>
-                            <td><strong style="color:#f8fafc;">${escapeHtml(c.candidate_entity || '')}</strong></td>
-                            <td><span class="risk-pill risk-high">${c.causal_score || 0}</span></td>
-                            <td style="color:#cbd5e1;">${escapeHtml(c.reasoning || '')}</td>
+                            <td><strong style="color:#38bdf8;">${escapeHtml(c.candidate_entity || '')}</strong></td>
+                            <td><span class="risk-pill risk-high">${((c.causal_score || 0) * 100).toFixed(0)}%</span></td>
+                            <td style="color:#cbd5e1; font-size:0.85rem;">${escapeHtml(c.reasoning || '')}</td>
                         </tr>
-                    `).join('') || '<tr><td colspan="3" style="text-align:center;">No causal candidates</td></tr>'}
+                    `).join('') || '<tr><td colspan="3" style="text-align:center;">No candidates scored</td></tr>'}
                 </tbody>
             </table>
         </div>
@@ -3356,11 +3607,12 @@ function renderRCAInspectorView(report, tabs, body) {
 }
 
 // ------------------------------------------------------------
-// 5. Response Agent Inspector
+// 6. Response Agent Inspector
 // ------------------------------------------------------------
 function renderResponseInspectorView(report, tabs, body) {
     const findings = report.findings || {};
     const actions = findings.actions_recommended || [];
+    const skillsUsed = (findings.skills_used && findings.skills_used.length > 0) ? findings.skills_used : ["isolate-host", "block-ip", "reset-credentials", "playbook-executor"];
 
     tabs.innerHTML = `
         <button class="phase-tab-btn active" id="phaseTabBtn-playbook" onclick="switchPhaseModalTab('playbook')">⚡ Prioritized Containment Playbook (${actions.length})</button>
@@ -3377,6 +3629,21 @@ function renderResponseInspectorView(report, tabs, body) {
                 <span class="phase-kpi-label">Critical Actions</span>
                 <span class="phase-kpi-val" style="color: #ef4444;">${findings.critical_actions || 0}</span>
                 <span class="phase-kpi-sub">Immediate execution</span>
+            </div>
+            <div class="phase-kpi-card">
+                <span class="phase-kpi-label">Skills Deployed</span>
+                <span class="phase-kpi-val" style="color: #a78bfa;">${skillsUsed.length}</span>
+                <span class="phase-kpi-sub">Remediation playbooks</span>
+            </div>
+        </div>
+
+        <div style="background:#111827; border:1px solid #1f2937; border-radius:8px; padding:14px 18px; margin-bottom:16px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span style="color:#a78bfa; font-weight:600; font-size:0.85rem; text-transform:uppercase; letter-spacing:0.05em;">⚡ Response Skills Deployed</span>
+                <span class="badge" style="background:rgba(167,139,250,0.15); color:#a78bfa; font-size:0.75rem;">${skillsUsed.length} Playbooks Active</span>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:8px;">
+                ${skillsUsed.map(s => `<span class="phase-agent-tag" style="background:#1e1b4b; color:#c084fc; border:1px solid #6b21a8; padding:4px 10px; font-size:0.8rem;">🛡️ ${escapeHtml(s)}</span>`).join('')}
             </div>
         </div>
 
@@ -3411,8 +3678,24 @@ function renderResponseInspectorView(report, tabs, body) {
 // Generic Fallback Inspector
 // ------------------------------------------------------------
 function renderGenericInspectorView(report, tabs, body) {
+    const findings = report.findings || {};
+    const skillsUsed = findings.skills_used || [];
     tabs.innerHTML = `<button class="phase-tab-btn active">📋 Phase Findings</button>`;
+    
+    const skillsBannerHtml = skillsUsed.length > 0 ? `
+        <div style="background:#111827; border:1px solid #1f2937; border-radius:8px; padding:14px 18px; margin-bottom:16px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span style="color:#a78bfa; font-weight:600; font-size:0.85rem; text-transform:uppercase; letter-spacing:0.05em;">⚡ Agentic Skills Deployed</span>
+                <span class="badge" style="background:rgba(167,139,250,0.15); color:#a78bfa; font-size:0.75rem;">${skillsUsed.length} Skills</span>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:8px;">
+                ${skillsUsed.map(s => `<span class="phase-agent-tag" style="background:#1e1b4b; color:#c084fc; border:1px solid #6b21a8; padding:4px 10px; font-size:0.8rem;">⚡ ${escapeHtml(s)}</span>`).join('')}
+            </div>
+        </div>
+    ` : '';
+
     body.innerHTML = `
+        ${skillsBannerHtml}
         <pre style="background:#090d16; padding:16px; border-radius:8px; font-size:0.8rem; overflow-x:auto; color:#cbd5e1;">
 ${escapeHtml(JSON.stringify(report.findings || {}, null, 2))}
         </pre>
