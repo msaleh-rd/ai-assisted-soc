@@ -3,17 +3,13 @@ name: isolate-host
 description: Isolates a compromised endpoint from the network by restricting inbound and outbound traffic while maintaining EDR connectivity.
 version: 1.0.0
 phase: response
-inputs:
-  - name: target_host
+method: handler
+actions:
+  - restrict_host_network
+parameters:
+  target_host:
     type: string
     description: Hostname or IP address of the target machine to isolate
-outputs:
-  - name: action_status
-    type: string
-    description: Execution result status (COMPLETED, FAILED, SIMULATED)
-  - name: execution_details
-    type: object
-    description: Firewall rules applied and network state changes
 mitre_attack:
   - T1048
   - T1567

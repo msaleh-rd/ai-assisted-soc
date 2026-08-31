@@ -91,7 +91,7 @@ class UniversalSkillRegistry:
             return self._all_cache
 
         all_skills = []
-        for phase in ["triage", "evidence", "compression", "discovery"]:
+        for phase in ["triage", "evidence", "compression", "discovery", "response"]:
             all_skills.extend(self.load_phase_skills(phase))
 
         for extra_dir in self.extra_skills_dirs:

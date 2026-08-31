@@ -3,20 +3,16 @@ name: kill-process
 description: Terminates malicious process instances and associated child process trees on endpoints.
 version: 1.0.0
 phase: response
-inputs:
-  - name: process_name
+method: handler
+actions:
+  - kill_malicious_process
+parameters:
+  process_name:
     type: string
     description: Process name, executable path, or PID to terminate
-  - name: target_host
+  target_host:
     type: string
     description: Hostname where the process is running
-outputs:
-  - name: action_status
-    type: string
-    description: Execution result status
-  - name: terminated_pids
-    type: array
-    description: List of PIDs terminated
 mitre_attack:
   - T1059
   - T1204

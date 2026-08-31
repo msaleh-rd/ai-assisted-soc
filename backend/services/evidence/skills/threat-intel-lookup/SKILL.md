@@ -14,6 +14,14 @@ actions:
   - lookup_hash_reputation
   - lookup_domain_reputation
 method: handler
+mitre_attack:
+  - T1071
+  - T1583
+  - T1584
+  - T1105
+nist_csf:
+  - DE.CM
+  - ID.RA
 parameters:
   ioc_value:
     type: string

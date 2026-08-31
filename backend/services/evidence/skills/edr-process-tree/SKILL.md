@@ -12,6 +12,14 @@ actions:
   - query_process_ancestry
   - find_child_processes
 method: handler
+mitre_attack:
+  - T1059
+  - T1059.004
+  - T1106
+  - T1204
+nist_csf:
+  - DE.CM
+  - DE.AE
 parameters:
   host_id:
     type: string

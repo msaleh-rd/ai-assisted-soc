@@ -13,6 +13,14 @@ actions:
   - analyze_file_metadata
   - check_ransomware_patterns
 method: handler
+mitre_attack:
+  - T1486
+  - T1027
+  - T1036
+  - T1105
+nist_csf:
+  - DE.AE
+  - DE.CM
 parameters:
   file_path_or_hash:
     type: string
