@@ -23,3 +23,27 @@ nist_csf:
 
 ## Overview
 Automates credential revocation and session invalidation across Active Directory and IAM identity providers when an identity compromise is confirmed.
+
+## Containment Commands
+When executed for user `{{target_user}}`, this skill models identity remediation:
+
+```bash
+# Linux PAM / shadow lock
+usermod -L {{target_user}}
+pkill -u {{target_user}}
+
+# Windows Active Directory (PowerShell)
+Disable-ADAccount -Identity "{{target_user}}"
+Revoke-AzureADUserAllRefreshToken -ObjectId "{{target_user}}"
+```
+
+## Rollback Commands
+To re-enable the user account:
+
+```bash
+# Linux PAM unlock
+usermod -U {{target_user}}
+
+# Windows Active Directory (PowerShell)
+Enable-ADAccount -Identity "{{target_user}}"
+```

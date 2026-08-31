@@ -22,3 +22,28 @@ nist_csf:
 
 ## Overview
 Restricts network access on a target endpoint via iptables or EDR agent isolation to prevent lateral movement and C2 communications during an active incident.
+
+## Containment Commands
+When executed on target `{{target_host}}`, this skill models firewall rules to block all traffic except EDR/Management telemetry:
+
+```bash
+# Allow established connections to management / EDR server
+iptables -A INPUT -s {{edr_management_ip}} -j ACCEPT
+iptables -A OUTPUT -d {{edr_management_ip}} -j ACCEPT
+
+# Drop all other traffic on {{target_host}}
+iptables -P INPUT DROP
+iptables -P OUTPUT DROP
+iptables -P FORWARD DROP
+```
+
+## Rollback Commands
+To reverse the containment on `{{target_host}}` and restore normal network operations:
+
+```bash
+# Flush rules and restore default ACCEPT policy
+iptables -F
+iptables -P INPUT ACCEPT
+iptables -P OUTPUT ACCEPT
+iptables -P FORWARD ACCEPT
+```

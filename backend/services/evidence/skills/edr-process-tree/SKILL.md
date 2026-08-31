@@ -34,6 +34,20 @@ parameters:
 ## Purpose
 Collects the full execution hierarchy around a suspicious process or script (e.g. `bash` -> `curl` -> `install.sh` -> `donotcry` or `cmd.exe` -> `powershell.exe -enc`).
 
+## Underlying Forensic Commands & Queries
+When querying live endpoints or Linux audit telemetry on host `{{host_id}}`, this skill models:
+
+```bash
+# Linux auditd execve and process ancestry
+ausearch -m execve -c "{{process_name_or_pid}}" --format text
+
+# Process tree hierarchy (Linux)
+pstree -p -a {{process_name_or_pid}}
+
+# Windows EDR process line (PowerShell)
+Get-CimInstance Win32_Process | Where-Object { $_.Name -match "{{process_name_or_pid}}" -or $_.ProcessId -eq "{{process_name_or_pid}}" } | Select-Object ProcessId, ParentProcessId, CommandLine
+```
+
 ## Outputs
 - Parent process name and PID
 - Exact CLI arguments executed

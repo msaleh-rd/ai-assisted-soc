@@ -32,6 +32,22 @@ parameters:
 ## Purpose
 Inspects file entities dropped or executed during an incident to detect encryption activity (high entropy), unsigned binaries masquerading as system files, or known ransomware payload signatures.
 
+## Underlying Forensic Commands
+While this skill executes via Python querying the Log Ingestor / SIEM, these are the underlying OS commands and queries it models:
+
+```bash
+# Hash calculation
+sha256sum {{file_path_or_hash}}
+md5sum {{file_path_or_hash}}
+
+# Check file signature and metadata (Linux)
+file {{file_path_or_hash}}
+stat {{file_path_or_hash}}
+
+# Entropy estimation (detecting packed/encrypted payloads)
+ent {{file_path_or_hash}}
+```
+
 ## Outputs
 - SHA256 / MD5 hashes
 - Entropy calculation (> 7.5 indicates encrypted or packed payload)

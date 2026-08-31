@@ -22,3 +22,28 @@ nist_csf:
 
 ## Overview
 Injects blocking rules into edge perimeter firewalls and host iptables to sever active connections to malicious C2 infrastructure or attacker pivots.
+
+## Containment Commands
+When executed, this skill injects firewall drop rules for `{{target_ip}}`:
+
+```bash
+# Linux iptables block
+iptables -I INPUT -s {{target_ip}} -j DROP
+iptables -I OUTPUT -d {{target_ip}} -j DROP
+
+# Windows Firewall block
+netsh advfirewall firewall add rule name="SOC_Block_{{target_ip}}" dir=in action=block remoteip={{target_ip}}
+netsh advfirewall firewall add rule name="SOC_Block_{{target_ip}}" dir=out action=block remoteip={{target_ip}}
+```
+
+## Rollback Commands
+To unblock the IP address:
+
+```bash
+# Linux iptables unblock
+iptables -D INPUT -s {{target_ip}} -j DROP
+iptables -D OUTPUT -d {{target_ip}} -j DROP
+
+# Windows Firewall unblock
+netsh advfirewall firewall delete rule name="SOC_Block_{{target_ip}}"
+```

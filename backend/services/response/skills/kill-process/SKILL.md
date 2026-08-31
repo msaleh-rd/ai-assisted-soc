@@ -24,3 +24,16 @@ nist_csf:
 
 ## Overview
 Issues SIGKILL/taskkill commands to terminate active malware processes, ransomware encryptors, or unauthorized shell sessions on target endpoints.
+
+## Containment Commands
+When executed on host `{{target_host}}`, this skill executes:
+
+```bash
+# Linux process termination
+pkill -9 -f "{{process_name}}"
+# or by PID
+kill -9 {{target_pid}}
+
+# Windows process termination
+taskkill /F /IM "{{process_name}}" /T
+```

@@ -36,6 +36,17 @@ parameters:
 ## Purpose
 Establishes whether an extracted IP, domain, or hash is known to threat researchers, associated with APT campaigns, ransomware syndicates (e.g. LockBit, DoNotCry, Conti), or botnet infrastructure.
 
+## Underlying Threat Intel Queries & Feeds
+When evaluating indicator `{{ioc_value}}`:
+
+```bash
+# VirusTotal API lookup (curl)
+curl -s --request GET --url "https://www.virustotal.com/api/v3/search?query={{ioc_value}}" --header "x-apikey: $VT_API_KEY"
+
+# AbuseIPDB IP reputation check
+curl -s -G https://api.abuseipdb.com/api/v2/check --data-urlencode "ipAddress={{ioc_value}}" -H "Key: $ABUSEIPDB_API_KEY"
+```
+
 ## Outputs
 - Malicious verdict (`is_known_malicious: true/false`)
 - Threat intelligence confidence / abuse score (0.0 to 1.0)
