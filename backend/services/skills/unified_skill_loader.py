@@ -44,8 +44,13 @@ class SOCSkill:
         return [attr for attr in requested if attr in available]
 
     def matches_mitre(self, technique_id: str) -> bool:
-        """Check if skill is mapped to a given MITRE ATT&CK technique."""
-        return technique_id.upper() in [t.upper() for t in self.mitre_attack]
+        """Check if skill is mapped to a given MITRE ATT&CK technique (supporting sub-techniques)."""
+        tid = technique_id.upper().strip()
+        for t in self.mitre_attack:
+            t_upper = t.upper().strip()
+            if t_upper == tid or t_upper.startswith(tid + ".") or tid.startswith(t_upper + "."):
+                return True
+        return False
 
     def render_command(self, values: Dict[str, str], use_fallback: bool = False) -> str:
         """Render command template with placeholder values."""
