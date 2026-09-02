@@ -11,11 +11,45 @@ class EntityType(str, Enum):
     USER = "user"
     HOST = "host"
     PROCESS = "process"
-    IP_ADDRESS = "ip_address"
+    IP = "ip"
+    IP_ADDRESS = "ip"
     DOMAIN = "domain"
     FILE = "file"
     NETWORK_FLOW = "network_flow"
     APPLICATION = "application"
+
+
+def normalize_entity_type(t: Any) -> str:
+    """Normalize various entity type representations to canonical SOC taxonomy."""
+    if not t:
+        return "unknown"
+    if hasattr(t, "value"):
+        t_clean = str(t.value).lower().strip()
+    else:
+        t_clean = str(t).lower().strip()
+    
+    mapping = {
+        "ip_address": "ip",
+        "ip": "ip",
+        "ipaddress": "ip",
+        "hostname": "host",
+        "host": "host",
+        "endpoint": "host",
+        "computer": "host",
+        "username": "user",
+        "user": "user",
+        "account": "user",
+        "identity": "user",
+        "filename": "file",
+        "filepath": "file",
+        "file": "file",
+        "process_name": "process",
+        "process": "process",
+        "domain_name": "domain",
+        "domain": "domain",
+        "url": "domain",
+    }
+    return mapping.get(t_clean, t_clean)
 
 
 class RelationshipType(str, Enum):

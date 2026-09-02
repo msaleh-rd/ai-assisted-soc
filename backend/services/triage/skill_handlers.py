@@ -222,7 +222,7 @@ class TriageSkillExecutor:
             return {
                 "tactic": technique.tactic_name,
                 "tactic_id": technique.tactic_id,
-                "technique": technique.name,
+                "technique": technique.technique_name,
                 "technique_id": tech_id,
                 "confidence": 0.85,
                 "recommended_skills": rec_skills,

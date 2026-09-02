@@ -198,9 +198,10 @@ class TriageAgent(BaseAgent):
         field_mappings = [
             (["host", "hostname", "dest_host", "src_host", "computer_name", "target_host"], "host"),
             (["user", "username", "account", "src_user", "dest_user", "target_user"], "user"),
-            (["process", "process_name", "parent_process", "image_name", "file_name", "filename"], "process"),
+            (["ip", "ip_address", "src_ip", "dest_ip", "srcip", "dstip"], "ip"),
+            (["file", "file_name", "filename", "file_path", "filepath", "target_file"], "file"),
+            (["process", "process_name", "parent_process", "image_name"], "process"),
             (["domain", "target_domain", "query"], "domain"),
-            (["file_path", "filepath", "target_file"], "file"),
         ]
 
         def search_dict(d):
@@ -431,6 +432,76 @@ class TriageAgent(BaseAgent):
         except Exception as ledger_err:
             logger.debug(f"Ledger recording skipped for triage: {ledger_err}")
 
+        # ---------------------------------------------------------------
+        # Execute real triage skill handlers to enrich/validate findings
+        # ---------------------------------------------------------------
+        from backend.services.triage.skill_handlers import TriageSkillExecutor
+
+        skill_results = {}
+        try:
+            # 1. IOC Extractor — deep regex extraction from raw alert
+            ioc_result = await TriageSkillExecutor.execute_skill(
+                "ioc-extractor", {"raw_alert": alert}
+            )
+            skill_results["ioc_extractor"] = ioc_result
+
+            # 2. MITRE Classifier — deterministic technique mapping
+            mitre_result = await TriageSkillExecutor.execute_skill(
+                "mitre-classifier", {"alert_data": alert}
+            )
+            skill_results["mitre_classifier"] = mitre_result
+            # Upgrade tactic/technique if the skill found a higher-confidence match
+            if mitre_result.get("confidence", 0) > findings.get("mitre_confidence", 0):
+                findings["tactic"] = mitre_result.get("tactic", findings.get("tactic"))
+                findings["technique"] = mitre_result.get("technique", findings.get("technique"))
+                findings["mitre_confidence"] = mitre_result.get("confidence", 0)
+                if mitre_result.get("tactic"):
+                    context.mitre_tactics = [mitre_result["tactic"]]
+                if mitre_result.get("technique_id"):
+                    context.mitre_techniques = [mitre_result["technique_id"]]
+
+            # 3. Severity Evaluator — keyword-based severity scoring
+            sev_result = await TriageSkillExecutor.execute_skill(
+                "severity-evaluator", {"alert_data": alert}
+            )
+            skill_results["severity_evaluator"] = sev_result
+            # Only upgrade severity (never downgrade)
+            sev_priority = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+            current_sev = str(findings.get("severity", "low")).lower()
+            skill_sev = str(sev_result.get("severity", "low")).lower()
+            if sev_priority.get(skill_sev, 0) > sev_priority.get(current_sev, 0):
+                findings["severity"] = sev_result["severity"]
+                context.severity = sev_result["severity"]
+            if sev_result.get("requires_immediate_action"):
+                findings["requires_immediate_action"] = True
+
+            # 4. Grounding Validator — verify entities exist in raw alert text
+            grounding_entities = []
+            for ent in findings.get("entities_identified", []):
+                val = ent.get("id") or ent.get("name") or ent.get("value", "")
+                grounding_entities.append({"value": val, **ent})
+            grounding_result = await TriageSkillExecutor.execute_skill(
+                "grounding-validator",
+                {"extracted_entities": grounding_entities, "raw_alert_text": json.dumps(alert)}
+            )
+            skill_results["grounding_validator"] = grounding_result
+            findings["hallucination_rate"] = grounding_result.get("hallucination_rate", 0)
+            findings["grounding_confidence"] = grounding_result.get("confidence_score", 1.0)
+
+            # 5. Threat Intel Pre-filter — check IOCs against known bad lists
+            ioc_entities = ioc_result.get("entities", {})
+            prefilter_result = await TriageSkillExecutor.execute_skill(
+                "threat-intel-prefilter", {"entities": ioc_entities}
+            )
+            skill_results["threat_intel_prefilter"] = prefilter_result
+            if prefilter_result.get("flagged_iocs"):
+                findings["prefilter_flagged_iocs"] = prefilter_result["flagged_iocs"]
+
+        except Exception as e:
+            logger.warning(f"Triage skill execution partially failed: {e}")
+
+        findings["skill_results"] = skill_results
+
         return AgentReport(
             agent_name=self.name,
             task="Triage and classify alert",
@@ -469,11 +540,35 @@ class EvidenceAgent(BaseAgent):
         # Mark pending requests as resolved
         context.resolve_messages(pending_requests)
 
+        # Deduplicate and normalize entity types and IDs
+        from backend.models.entities import normalize_entity_type
+
         all_entities = []
+        seen_entity_keys = set()
         for ent in entities + targeted_entities:
             if isinstance(ent, str):
                 ent = {"type": "unknown", "id": ent}
-            all_entities.append(ent)
+            elif isinstance(ent, dict):
+                ent = dict(ent)
+            
+            ent_id = str(ent.get("id") or ent.get("name") or "unknown").strip()
+            ent_type = normalize_entity_type(ent.get("type", "unknown"))
+
+            # Strip accidental type prefixes from id (e.g., 'file:install.sh' -> 'install.sh')
+            for prefix in ("file:", "ip:", "ip_address:", "host:", "user:", "process:", "domain:", "hash:"):
+                if ent_id.lower().startswith(prefix):
+                    extracted_type = prefix.rstrip(":")
+                    ent_id = ent_id[len(prefix):]
+                    if ent_type in ("unknown", "host"):
+                        ent_type = normalize_entity_type(extracted_type)
+
+            ent["id"] = ent_id
+            ent["type"] = ent_type
+
+            key = (ent_type, ent_id)
+            if key not in seen_entity_keys and ent_id not in ("unknown", ""):
+                seen_entity_keys.add(key)
+                all_entities.append(ent)
             
         inv_id = getattr(context, "investigation_id", None) or context.alert_data.get("alert_id", "inv-unknown")
         evidence_context = await orchestrator.collect_for_entities(
@@ -495,7 +590,7 @@ class EvidenceAgent(BaseAgent):
         
         for ent in all_entities:
             eid_raw = ent.get("id") or ent.get("name") or "unknown"
-            etype = ent.get("type", "unknown").lower()
+            etype = normalize_entity_type(ent.get("type", "unknown"))
             
             # Determine targeted skills based on entity type and alert context
             target_skills = []
@@ -541,19 +636,32 @@ class EvidenceAgent(BaseAgent):
                     entity_graph[eid]["threat_intel"].update(skill_res.get("threat_intel", {}))
                     entity_graph[eid]["risk_score"] = max(entity_graph[eid]["risk_score"], skill_res.get("risk_score", 0.0))
 
-        # Merge standard evidence collector nodes
+        # Merge standard evidence collector nodes with unified normalization
         for entity_node in evidence_context['entities'].values():
-            eid = f"{entity_node.entity_type.value if hasattr(entity_node.entity_type, 'value') else str(entity_node.entity_type)}:{entity_node.entity_id}"
+            raw_node_type = entity_node.entity_type.value if hasattr(entity_node.entity_type, 'value') else str(entity_node.entity_type)
+            node_type = normalize_entity_type(raw_node_type)
+            node_id = str(entity_node.entity_id).strip()
+            for prefix in ("file:", "ip:", "ip_address:", "host:", "user:", "process:", "domain:", "hash:"):
+                if node_id.lower().startswith(prefix):
+                    node_id = node_id[len(prefix):]
+            
+            eid = f"{node_type}:{node_id}"
             if eid not in entity_graph:
                 entity_graph[eid] = {
-                    "type": entity_node.entity_type.value if hasattr(entity_node.entity_type, 'value') else str(entity_node.entity_type),
-                    "id": entity_node.entity_id,
+                    "type": node_type,
+                    "id": node_id,
                     "risk_score": entity_node.risk_score,
                     "evidence_count": len(entity_node.enrichment_data) if entity_node.enrichment_data else 0,
-                    "enrichment": entity_node.enrichment_data,
-                    "threat_intel": entity_node.threat_intel,
-                    "attributes": entity_node.attributes,
+                    "enrichment": entity_node.enrichment_data or {},
+                    "threat_intel": entity_node.threat_intel or {},
+                    "attributes": entity_node.attributes or {},
                 }
+            else:
+                if entity_node.enrichment_data:
+                    entity_graph[eid]["enrichment"].update(entity_node.enrichment_data)
+                if entity_node.threat_intel:
+                    entity_graph[eid]["threat_intel"].update(entity_node.threat_intel)
+                entity_graph[eid]["risk_score"] = max(entity_graph[eid].get("risk_score", 0.0), entity_node.risk_score or 0.0)
                 
         # Handle relationships from evidence context
         for rel in evidence_context.get('relationships', []):
@@ -565,17 +673,20 @@ class EvidenceAgent(BaseAgent):
 
         # Add original heuristic relationships
         for ent in all_entities:
-            eid = f"{ent.get('type', 'unknown')}:{ent.get('id', 'unknown')}"
-            if ent.get("type") == "process" and any(e.get("type") == "host" for e in all_entities):
-                host = next((e for e in all_entities if e.get("type") == "host"), None)
+            ent_id = ent.get("id", "unknown")
+            ent_type = normalize_entity_type(ent.get("type", "unknown"))
+            eid = f"{ent_type}:{ent_id}"
+            
+            if ent_type == "process" and any(normalize_entity_type(e.get("type")) == "host" for e in all_entities):
+                host = next((e for e in all_entities if normalize_entity_type(e.get("type")) == "host"), None)
                 if host:
                     relationships.append({
                         "source": eid,
                         "target": f"host:{host['id']}",
                         "type": "runs_on"
                     })
-            if ent.get("type") == "user" and any(e.get("type") == "host" for e in all_entities):
-                host = next((e for e in all_entities if e.get("type") == "host"), None)
+            if ent_type == "user" and any(normalize_entity_type(e.get("type")) == "host" for e in all_entities):
+                host = next((e for e in all_entities if normalize_entity_type(e.get("type")) == "host"), None)
                 if host:
                     relationships.append({
                         "source": eid,
