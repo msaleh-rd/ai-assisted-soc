@@ -15,6 +15,8 @@ document.querySelectorAll('.nav-item').forEach(item => {
             loadPendingApprovals();
         } else if (page === 'history') {
             loadInvestigationHistory();
+        } else if (page === 'ai-governance') {
+            getAIGovernanceOverview();
         }
     });
 });
@@ -3335,6 +3337,72 @@ function renderEvidenceInspectorView(report, tabs, body) {
             </div>
         </div>
     `;
+
+// === Page: AI Governance (Wave 1-3) ===
+async function getAIGovernanceOverview() {
+    const res = await apiFetch('/api/v1/ai-governance/overview');
+    showResult('aiGovOverviewResult', res.data, !res.ok);
+}
+
+async function listDetectionRules() {
+    const res = await apiFetch('/api/v1/ai-governance/detections');
+    showResult('detectionRulesResult', res.data, !res.ok);
+}
+
+async function listEntityRisk() {
+    const res = await apiFetch('/api/v1/ai-governance/entity-risk');
+    showResult('entityRiskResult', res.data, !res.ok);
+}
+
+async function getMaturityGateStatus() {
+    const res = await apiFetch('/api/v1/ai-governance/maturity-gate');
+    showResult('maturityGateResult', res.data, !res.ok);
+}
+
+async function listPlaybooks() {
+    const res = await apiFetch('/api/v1/ai-governance/playbooks');
+    showResult('playbooksResult', res.data, !res.ok);
+}
+
+async function listMemoryPriors() {
+    const res = await apiFetch('/api/v1/ai-governance/memory/priors');
+    showResult('memoryPriorsResult', res.data, !res.ok);
+}
+
+async function runMemoryDistillation() {
+    const res = await apiFetch('/api/v1/ai-governance/memory/distill', { method: 'POST' });
+    showResult('memoryPriorsResult', res.data, !res.ok);
+}
+
+async function runPurpleTeamCampaign() {
+    const campaign_name = document.getElementById('purpleTeamCampaign').value;
+    const res = await apiFetch('/api/v1/ai-governance/purple-team/run', {
+        method: 'POST',
+        body: JSON.stringify({ campaign_name })
+    });
+    showResult('purpleTeamResult', res.data, !res.ok);
+}
+
+async function viewInvestigationLedger() {
+    const investigation_id = document.getElementById('ledgerInvId').value;
+    if (!investigation_id) {
+        showResult('ledgerResult', 'Please enter an Investigation ID', true);
+        return;
+    }
+    const res = await apiFetch(`/api/v3/orchestrator/investigations/${encodeURIComponent(investigation_id)}/ledger`);
+    showResult('ledgerResult', res.data, !res.ok);
+}
+
+async function viewInvestigationLedgerCost() {
+    const investigation_id = document.getElementById('ledgerInvId').value;
+    if (!investigation_id) {
+        showResult('ledgerResult', 'Please enter an Investigation ID', true);
+        return;
+    }
+    const res = await apiFetch(`/api/v3/orchestrator/investigations/${encodeURIComponent(investigation_id)}/ledger/cost`);
+    showResult('ledgerResult', res.data, !res.ok);
+}
+
 
     // Entities Table
     let entityRows = '';

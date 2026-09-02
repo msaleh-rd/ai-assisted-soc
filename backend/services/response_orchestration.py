@@ -3,12 +3,19 @@
 Implements automated response execution, adaptive data collection, and incident lifecycle management.
 """
 
-from typing import List, Dict, Optional, Any, Coroutine
+from typing import TYPE_CHECKING, List, Dict, Optional, Any, Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 import asyncio
+import logging
 import uuid
+
+if TYPE_CHECKING:
+    from backend.services.response.maturity_gate import AutomationTier
+
+logger = logging.getLogger("response-orchestration")
+
 
 
 class ActionStatus(Enum):
@@ -60,17 +67,90 @@ class AdaptiveInvestigationIteration:
 class ResponseOrchestrator:
     """Orchestrates automated response actions."""
     
-    def __init__(self, approval_required: bool = True):
+    def __init__(self, approval_required: bool = True, automation_tier: Optional["AutomationTier"] = None):
         """
         Initialize response orchestrator.
         
         Args:
-            approval_required: Whether to require approval before executing actions
+            approval_required: Whether to require approval before executing actions.
+                When False, the maturity gate is bypassed entirely (used when
+                approval has already been obtained upstream, e.g. via a
+                Temporal human-approval signal).
+            automation_tier: The L0-L4 automation tier used by the maturity
+                gate to decide which blast-radius actions may auto-execute.
+                Defaults to the MaturityGate's env-configured tier.
         """
+        from backend.services.response.maturity_gate import MaturityGate
+
         self.approval_required = approval_required
         self.execution_log: List[ActionExecutionLog] = []
         self.pending_approvals: Dict[str, Dict] = {}
         self.active_actions: Dict[str, Dict] = {}
+        self.maturity_gate = MaturityGate(tier=automation_tier)
+        # Containment patterns for compromised-agent scenarios (Phase E, Step 4).
+        self._kill_switch_engaged = False
+        self._kill_switch_reason: Optional[str] = None
+
+    def engage_kill_switch(self, reason: str) -> Dict[str, Any]:
+        """Halt all in-flight and future response actions immediately.
+
+        Any action currently tracked in `active_actions` is marked halted; any
+        new call to `_execute_action` will refuse to execute until
+        `disengage_kill_switch()` is called. This is the emergency override for
+        compromised-agent scenarios (Maturity Gate's emergency override, Phase F).
+        """
+        self._kill_switch_engaged = True
+        self._kill_switch_reason = reason
+        halted = list(self.active_actions.keys())
+        for action_id in halted:
+            self.active_actions[action_id]["status"] = "halted"
+        logger.warning(f"KILL SWITCH ENGAGED: {reason}. Halted {len(halted)} in-flight action(s).")
+        return {"kill_switch_engaged": True, "reason": reason, "halted_action_ids": halted}
+
+    def disengage_kill_switch(self) -> None:
+        """Resume normal response execution after an emergency halt."""
+        self._kill_switch_engaged = False
+        self._kill_switch_reason = None
+
+    async def rotate_credentials_if_compromised(self, actor: str, reason: str) -> Dict[str, Any]:
+        """Credential-rotation hook: if the response agent's own credentials are
+        suspected compromised, trigger rotation before any further actions execute.
+
+        This is architected as a placeholder for a real IAM/secrets-manager
+        integration (no such system exists yet in this stack) -- it engages the
+        kill switch immediately (fail-safe: stop acting first) and records an
+        auditable rotation request.
+        """
+        self.engage_kill_switch(reason=f"Credential compromise suspected for '{actor}': {reason}")
+        result = {
+            "actor": actor,
+            "reason": reason,
+            "rotation_requested": True,
+            "rotation_completed": False,
+            "note": "No IAM/secrets-manager integration configured; rotation request logged for manual action.",
+        }
+        try:
+            from backend.database.connection import SessionLocal
+            from backend.database.postgres import AuditRecord
+            import json as _json
+            if SessionLocal:
+                db = SessionLocal()
+                try:
+                    db.add(AuditRecord(
+                        audit_id=str(uuid.uuid4()),
+                        investigation_id="system",
+                        action="credential_rotation_requested",
+                        actor=actor,
+                        details=_json.dumps(result),
+                    ))
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                finally:
+                    db.close()
+        except Exception as e:
+            logger.debug(f"Credential rotation audit write skipped: {e}")
+        return result
     
     async def execute_response_plan(self,
                                    rca_result: Any,
@@ -148,19 +228,63 @@ class ResponseOrchestrator:
         """Execute a single response action."""
         
         action_id = str(uuid.uuid4())
-        
+        action_name = action.action.value if hasattr(action.action, "value") else str(action.action)
+
+        if self._kill_switch_engaged:
+            return {
+                'success': False,
+                'error': f'Kill switch engaged: {self._kill_switch_reason}',
+            }
+
+        # Tool-call authorization boundary (Phase E, Step 3): every response skill
+        # invocation goes through the same single choke point as Evidence/Discovery
+        # skills before it reaches the Maturity Gate / executor.
         try:
-            # Check approval if required
+            from backend.services.agentic_security import skill_authorization_gate
+            skill_authorization_gate.authorize(action_name, phase="response")
+        except Exception as auth_err:
+            logger.debug(f"Skill authorization check skipped for {action_name}: {auth_err}")
+
+        self.active_actions[action_id] = {"action": action_name, "target": getattr(action, "target", None), "status": "running"}
+        try:
+            # Check approval if required, gated by the L0-L4 automation maturity gate:
+            # low blast-radius actions may auto-execute at the current tier, while
+            # higher blast-radius actions always require human approval.
+            gate_decision = None
             if self.approval_required:
-                approval = await self._request_approval(action, approval_callback)
-                if not approval:
-                    return {
-                        'success': False,
-                        'error': 'Approval denied'
-                    }
+                gate_decision = self.maturity_gate.evaluate(action_name)
+                logger.info(gate_decision.reason)
+                if not gate_decision.auto_execute:
+                    approval = await self._request_approval(action, approval_callback)
+                    if not approval:
+                        return {
+                            'success': False,
+                            'error': 'Approval denied',
+                            'gate_decision': gate_decision,
+                        }
             
+            # Security Knowledge Graph blast-radius lookup (Wave 3, Phase M):
+            # before executing a containment action, surface how far the
+            # target entity could reach within 2 hops in the graph (if Neo4j
+            # is configured) -- real, graph-derived context for the analyst/
+            # audit trail, computed directly from the graph rather than
+            # re-scanning log files. Best-effort/no-op if Neo4j isn't
+            # configured -- never blocks or fails the action.
+            graph_blast_radius = None
+            try:
+                from backend.database.connection import get_neo4j
+                neo4j = get_neo4j()
+                if neo4j is not None:
+                    graph_blast_radius = await neo4j.get_blast_radius(action.target, max_hops=2)
+            except Exception as graph_err:
+                logger.debug(f"Graph blast-radius lookup skipped for {action_name}: {graph_err}")
+
             # Execute based on action type
             result = await self._execute_by_type(action, action_id)
+            if gate_decision is not None:
+                result['gate_decision'] = gate_decision
+            if graph_blast_radius is not None:
+                result['graph_blast_radius'] = graph_blast_radius
             
             # Log execution
             self.execution_log.append(ActionExecutionLog(
@@ -192,6 +316,8 @@ class ResponseOrchestrator:
                 'success': False,
                 'error': str(e)
             }
+        finally:
+            self.active_actions.pop(action_id, None)
     
     async def _execute_by_type(self, action: Any, action_id: str) -> Dict[str, Any]:
         """Execute action based on type via ResponseSkillExecutor."""

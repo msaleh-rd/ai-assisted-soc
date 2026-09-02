@@ -1,0 +1,23 @@
+{
+  "positive": [
+    {
+      "destination_port_suspicious": true,
+      "direction": "outbound",
+      "destination_ip": "198.51.100.23",
+      "destination_port": 4444
+    }
+  ],
+  "negative": [
+    {
+      "destination_port_suspicious": false,
+      "direction": "outbound",
+      "destination_port": 443
+    },
+    {
+      "destination_port_suspicious": true,
+      "direction": "inbound",
+      "destination_port": 4444,
+      "note": "Suspicious port but inbound -- not the outbound C2 pattern this rule targets."
+    }
+  ]
+}

@@ -28,6 +28,8 @@ class ResponseSkillExecutor:
             "patch-system": ResponseSkillExecutor._handle_patch_system,
             "update-firewall": ResponseSkillExecutor._handle_update_firewall,
             "enable-mfa": ResponseSkillExecutor._handle_enable_mfa,
+            "quarantine-file": ResponseSkillExecutor._handle_quarantine_file,
+            "notify-soc-team": ResponseSkillExecutor._handle_notify_soc_team,
         }
 
         # Normalize skill name (e.g. isolate_host -> isolate-host)
@@ -186,6 +188,41 @@ class ResponseSkillExecutor:
             "action": "enable-mfa",
             "target": target,
             "result": f"Enforced multi-factor authentication (MFA) on user account '{target}'.",
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+
+    # ------------------------------------------------------------------
+    # Skill: Quarantine File
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _handle_quarantine_file(target: str, params: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+        quarantine_path = f"/var/quarantine/{target.split('/')[-1]}"
+        return {
+            "success": True,
+            "status": "completed",
+            "action": "quarantine-file",
+            "target": target,
+            "result": f"Quarantined file '{target}' to secure isolation directory.",
+            "quarantine_path": quarantine_path,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+
+    # ------------------------------------------------------------------
+    # Skill: Notify SOC Team
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _handle_notify_soc_team(target: str, params: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+        message = params.get("message", f"Notification regarding target '{target}'.")
+        channel = params.get("channel", "slack")
+        return {
+            "success": True,
+            "status": "completed",
+            "action": "notify-soc-team",
+            "target": target,
+            "result": f"Notification sent to SOC team via {channel}: {message}",
+            "channel": channel,
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }
 

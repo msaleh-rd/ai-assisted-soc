@@ -224,6 +224,17 @@ def _get_report_status(report) -> str:
     return "unknown"
 
 
+def find_matching_playbook(alert_data: Dict[str, Any]) -> Optional[Any]:
+    """Wave 3, Phase K: returns the first declarative playbook (see
+    `backend/services/playbook_engine.py`) whose trigger matches this alert, or
+    None if no playbook applies -- in which case callers fall through to the
+    static 5-phase plan unchanged (zero regression for the common/no-match
+    case, which is virtually every alert today since only one starter
+    playbook exists)."""
+    from backend.services.playbook_engine import playbook_engine
+    return playbook_engine.find_matching_playbook(alert_data)
+
+
 def synthesize_reports(
     reports: Dict[str, Any],
     context: Any = None,

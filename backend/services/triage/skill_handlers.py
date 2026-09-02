@@ -8,6 +8,7 @@ from datetime import datetime
 
 from backend.models.alert import AlertSeverity
 from backend.services.mitre_mapper import mitre_mapper
+from backend.services.threat_intel.local_feeds import local_threat_intel_db
 
 logger = logging.getLogger("triage-skills")
 
@@ -68,6 +69,37 @@ class TriageSkillExecutor:
             if len(str(h)) == 64 and (str(h).startswith("dead") or str(h).startswith("beef")):
                 flagged.append({"ioc": h, "type": "hash", "reason": "Flagged malware hash signature", "risk": 0.99})
 
+        # Ground-truth checks against locally-vendored threat-intel feeds (deterministic,
+        # no LLM guesswork): suspicious destination ports and known malware mutex names.
+        ports = entities.get("ports", [])
+        for port in ports:
+            try:
+                port_match = local_threat_intel_db.lookup_port(int(port))
+            except (TypeError, ValueError):
+                port_match = None
+            if port_match:
+                flagged.append({
+                    "ioc": port,
+                    "type": "port",
+                    "reason": port_match.detail or "Known suspicious/malware-associated port",
+                    "risk": port_match.confidence,
+                    "source": port_match.source,
+                    "source_list": port_match.source_list,
+                })
+
+        processes = entities.get("processes", []) + entities.get("mutexes", [])
+        for proc in processes:
+            mutex_match = local_threat_intel_db.lookup_mutex(str(proc))
+            if mutex_match:
+                flagged.append({
+                    "ioc": proc,
+                    "type": "mutex",
+                    "reason": mutex_match.detail or "Known malware mutex name",
+                    "risk": mutex_match.confidence,
+                    "source": mutex_match.source,
+                    "source_list": mutex_match.source_list,
+                })
+
         return {
             "flagged_iocs": flagged,
             "flagged_count": len(flagged),
@@ -104,7 +136,9 @@ class TriageSkillExecutor:
             "users": [],
             "hosts": [],
             "processes": [],
-            "files": []
+            "files": [],
+            "ports": [],
+            "mutexes": []
         }
 
         if isinstance(raw_alert, dict):
@@ -126,10 +160,46 @@ class TriageSkillExecutor:
                 elif any(x in k_low for x in ("file", "filename", "file_name", "file_path")):
                     if val_str not in entities["files"]:
                         entities["files"].append(val_str)
+                elif any(x in k_low for x in ("port", "dest_port", "dst_port")):
+                    if val_str not in entities["ports"]:
+                        entities["ports"].append(val_str)
+                elif "mutex" in k_low:
+                    if val_str not in entities["mutexes"]:
+                        entities["mutexes"].append(val_str)
+
+        # Ground-truth tagging: check extracted files against locally-vendored ransomware
+        # extension/note lists so downstream skills (severity-evaluator, etc.) don't need
+        # to re-derive this — deterministic evidence beats LLM guesswork.
+        threat_intel_matches: List[Dict[str, Any]] = []
+        for file_value in entities["files"]:
+            ext_match = local_threat_intel_db.lookup_extension(file_value)
+            if ext_match:
+                threat_intel_matches.append({
+                    "ioc": file_value,
+                    "indicator_type": "ransomware_extension",
+                    "category": ext_match.category,
+                    "confidence": ext_match.confidence,
+                    "detail": ext_match.detail,
+                    "source": ext_match.source,
+                    "source_list": ext_match.source_list,
+                })
+                continue
+            note_match = local_threat_intel_db.lookup_ransomware_note(file_value)
+            if note_match:
+                threat_intel_matches.append({
+                    "ioc": file_value,
+                    "indicator_type": "ransomware_note",
+                    "category": note_match.category,
+                    "confidence": note_match.confidence,
+                    "detail": note_match.detail,
+                    "source": note_match.source,
+                    "source_list": note_match.source_list,
+                })
 
         return {
             "entities": entities,
             "total_iocs_found": sum(len(v) for v in entities.values()),
+            "threat_intel_matches": threat_intel_matches,
             "status": "success"
         }
 
@@ -176,9 +246,56 @@ class TriageSkillExecutor:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _check_local_threat_intel(alert_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Check alert_data fields against locally-vendored threat-intel ground truth.
+
+        Scans string/list values for known ransomware extensions, ransomware note filenames,
+        and malware mutex names. Returns match details on the first hit, or None if nothing
+        matches — letting severity scoring skip keyword/LLM guesswork entirely when a
+        deterministic indicator is present.
+        """
+        candidates: List[str] = []
+        for v in alert_data.values():
+            if isinstance(v, str) and v.strip():
+                candidates.append(v.strip())
+            elif isinstance(v, list):
+                candidates.extend(str(x).strip() for x in v if str(x).strip())
+
+        for candidate in candidates:
+            ext_match = local_threat_intel_db.lookup_extension(candidate)
+            if ext_match:
+                return {"match": ext_match, "matched_value": candidate, "indicator_type": "ransomware_extension"}
+            note_match = local_threat_intel_db.lookup_ransomware_note(candidate)
+            if note_match:
+                return {"match": note_match, "matched_value": candidate, "indicator_type": "ransomware_note"}
+            mutex_match = local_threat_intel_db.lookup_mutex(candidate)
+            if mutex_match:
+                return {"match": mutex_match, "matched_value": candidate, "indicator_type": "suspicious_mutex"}
+        return None
+
+    @staticmethod
     async def _handle_severity_evaluator(input_data: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
         alert_data = input_data.get("alert_data", input_data)
         text = json.dumps(alert_data).lower()
+
+        intel_hit = TriageSkillExecutor._check_local_threat_intel(alert_data)
+        if intel_hit:
+            match = intel_hit["match"]
+            return {
+                "severity": AlertSeverity.CRITICAL.value,
+                "risk_score": max(0.9, match.confidence),
+                "requires_immediate_action": True,
+                "grounded": True,
+                "grounding_source": match.source,
+                "grounding_detail": {
+                    "indicator_type": intel_hit["indicator_type"],
+                    "matched_value": intel_hit["matched_value"],
+                    "category": match.category,
+                    "source_list": match.source_list,
+                    "detail": match.detail,
+                },
+                "status": "success"
+            }
 
         if any(k in text for k in ("ransom", "donotcry", "wannacry", "encrypt", "domain admin", "c2 beacon")):
             severity = AlertSeverity.CRITICAL
@@ -201,6 +318,7 @@ class TriageSkillExecutor:
             "severity": severity.value if hasattr(severity, "value") else str(severity),
             "risk_score": score,
             "requires_immediate_action": requires_immediate_action,
+            "grounded": False,
             "status": "success"
         }
 

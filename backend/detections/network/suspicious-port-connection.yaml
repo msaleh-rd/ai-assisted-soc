@@ -1,0 +1,25 @@
+id: suspicious-port-connection
+name: "Connection to Known-Suspicious Port"
+severity: medium
+category: network
+tags:
+  - "mitre.attack.T1071"
+log_source: network
+
+# First proof-of-pattern migration: network-flow-analyzer's existing
+# suspicious-port lookup (backend/services/threat_intel/local_feeds.py,
+# Phase A) expressed as an explicit, reviewable Detection-as-Code rule.
+detection:
+  condition: "all"
+  rules:
+    - field: destination_port_suspicious
+      op: equals
+      value: true
+    - field: direction
+      op: equals
+      value: outbound
+
+false_positives: >
+  Some suspicious ports are also used by legitimate internal tooling --
+  correlate with destination reputation before auto-blocking.
+playbook: null

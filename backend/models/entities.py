@@ -271,3 +271,25 @@ class EntityFactory:
             entity_name=ip_address,
             attributes=ip_attrs.__dict__
         )
+
+    @staticmethod
+    def create_process_entity(process_id: str, process_name: str,
+                             attributes: Dict[str, Any]) -> EntityNode:
+        """Create process entity node (Wave 3, Phase M: needed for the
+        user->host->process ingest-time graph)."""
+        process_attrs = ProcessEntity(
+            process_id=int(process_id) if str(process_id).isdigit() else 0,
+            process_name=process_name,
+            process_path=attributes.get("process_path", ""),
+            command_line=attributes.get("command_line", ""),
+        )
+        for key, value in attributes.items():
+            if hasattr(process_attrs, key):
+                setattr(process_attrs, key, value)
+
+        return EntityNode(
+            entity_id=str(process_id),
+            entity_type=EntityType.PROCESS,
+            entity_name=process_name,
+            attributes=process_attrs.__dict__
+        )

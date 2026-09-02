@@ -1,0 +1,51 @@
+# Ransomware Response Playbook (Wave 3, Phase K — first declarative playbook)
+#
+# Triggers on critical/high severity alerts tagged as ransomware (or MITRE
+# T1486 - Data Encrypted for Impact). Isolates the affected host first
+# (failure here does NOT abort the playbook -- investigation must still
+# proceed even if isolation fails, e.g. because the host is already offline
+# or containment requires manual action), then runs a full investigation,
+# notifies the SOC team, and generates an incident report.
+
+id: ransomware-response-v1
+name: Ransomware Response
+version: "1.0"
+description: >
+  Automated first-response playbook for suspected ransomware incidents:
+  contain, investigate, notify, and report.
+
+trigger:
+  severity:
+    - critical
+    - high
+  tags:
+    - ransomware
+    - T1486
+
+steps:
+  - id: contain
+    name: Isolate affected host
+    type: isolate_host
+    on_failure: continue
+    timeout_seconds: 60
+
+  - id: investigate
+    name: Run full investigation (forensics + lateral movement focus)
+    type: investigate
+    on_failure: abort
+    timeout_seconds: 900
+
+  - id: notify
+    name: Notify SOC team
+    type: notify
+    params:
+      channel: slack
+      message: "Ransomware playbook engaged -- investigation in progress."
+    on_failure: continue
+    timeout_seconds: 30
+
+  - id: report
+    name: Generate incident report
+    type: generate_report
+    on_failure: continue
+    timeout_seconds: 60

@@ -1,0 +1,74 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ai-assisted-soc/backend/playbook.schema.json",
+  "title": "Playbook",
+  "description": "Declarative incident-response playbook: trigger conditions + an ordered list of steps executed against a matching investigation (Wave 3, Phase K).",
+  "type": "object",
+  "required": ["id", "name", "version", "trigger", "steps"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Stable unique identifier for this playbook, e.g. 'ransomware-response-v1'."
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable playbook name."
+    },
+    "version": {
+      "type": "string",
+      "description": "Playbook version, e.g. '1.0'."
+    },
+    "description": {
+      "type": "string"
+    },
+    "trigger": {
+      "type": "object",
+      "description": "Conditions under which this playbook fires for an incoming alert.",
+      "properties": {
+        "severity": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["critical", "high", "medium", "low", "informational"] },
+          "description": "Alert severities (case-insensitive) that this playbook applies to."
+        },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Tags/classification keywords/MITRE technique IDs matched against the alert's classification, tactic, technique, and description fields."
+        }
+      },
+      "additionalProperties": false
+    },
+    "steps": {
+      "type": "array",
+      "description": "Ordered list of steps executed in sequence when this playbook's trigger matches.",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "type"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "type": {
+            "type": "string",
+            "enum": ["isolate_host", "investigate", "notify", "generate_report"]
+          },
+          "params": {
+            "type": "object",
+            "description": "Free-form parameters passed to the step's handler."
+          },
+          "on_failure": {
+            "type": "string",
+            "enum": ["abort", "continue", "retry"],
+            "default": "abort",
+            "description": "abort: stop the whole playbook. continue: log the failure and proceed. retry: retry the step once, then fall back to 'continue' semantics."
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "description": "Advisory timeout for this step (not currently enforced by a hard deadline, recorded for audit/future use)."
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

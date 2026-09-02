@@ -11,6 +11,19 @@ from backend.models.alert import (
 )
 from backend.services.alert_normalizer import AlertNormalizerFactory
 from backend.services.alert_deduplicator import AlertDeduplicator
+from backend.services.entity_risk import entity_risk_tracker, severity_to_risk_score
+
+
+def _extract_entity_key(entity_value: Any) -> Optional[str]:
+    """Best-effort extraction of a stable identifier from a primary_entities value."""
+    if isinstance(entity_value, str):
+        return entity_value or None
+    if isinstance(entity_value, dict):
+        for key in ("id", "hostname", "name", "hash", "path"):
+            val = entity_value.get(key)
+            if val:
+                return str(val)
+    return None
 
 
 class AlertIntakeService:
@@ -89,6 +102,30 @@ class AlertIntakeService:
         except Exception:
             pass
         
+        # Update per-entity time-decayed cumulative risk and flag any entity
+        # that has crossed the auto-promotion threshold (QW-3: Entity-Risk Scoring).
+        entity_risk_updates = []
+        risk_score = severity_to_risk_score(
+            final_alert.severity.value if hasattr(final_alert.severity, 'value') else str(final_alert.severity)
+        )
+        for entity_type, entity_value in (final_alert.primary_entities or {}).items():
+            entity_key = _extract_entity_key(entity_value)
+            if not entity_key:
+                continue
+            update = entity_risk_tracker.record_alert(
+                entity_id=f"{entity_type}:{entity_key}",
+                entity_type=entity_type,
+                alert_id=final_alert.alert_id,
+                risk_score=risk_score,
+            )
+            entity_risk_updates.append({
+                'entity_id': update.entity_id,
+                'entity_type': update.entity_type,
+                'cumulative_risk': round(update.cumulative_risk, 4),
+                'promoted': update.promoted,
+                'newly_promoted': update.newly_promoted,
+            })
+        
         return {
             'status': 'deduplicated' if dedup_result.is_duplicate else 'accepted',
             'alert_id': final_alert.alert_id,
@@ -99,6 +136,7 @@ class AlertIntakeService:
             'severity': final_alert.severity.value,
             'source': final_alert.source_name,
             'timestamp_received': final_alert.timestamp_received,
+            'entity_risk': entity_risk_updates,
         }
     
     async def ingest_alerts_batch(self, alerts: List[Dict[str, Any]],

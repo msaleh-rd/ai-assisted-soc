@@ -15,8 +15,60 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, AsyncGenerator, Dict, List, Optional
 from backend.services.investigation_context import InvestigationContext
+from backend.services.agentic_security import wrap_untrusted
 
 logger = logging.getLogger("orchestrator")
+
+
+def _escalate_entity_promotion(context: "InvestigationContext", update: Any, source_agent: str) -> None:
+    """Escalate a newly-auto-promoted entity (Wave 2 / Phase G full rollout).
+
+    Cross-alert cumulative risk crossing the promotion threshold is a real
+    escalation signal, so it is (1) posted to the investigation blackboard for
+    the ReAct Supervisor / analysts to see, and (2) written to the audit trail
+    for durable, queryable visibility -- independent of whether a formal
+    incident (IncidentLifecycleManager, which requires a completed RCA) has
+    been created yet.
+    """
+    investigation_id = getattr(context, "investigation_id", None) or (context.alert_data or {}).get("alert_id", "unknown")
+    context.post_message(
+        msg_type="FYI",
+        source=source_agent,
+        target="*",
+        payload={
+            "entity_risk_promoted": update.entity_id,
+            "cumulative_risk": round(update.cumulative_risk, 4),
+            "reason": update.reason,
+        },
+    )
+    try:
+        from backend.database.connection import SessionLocal
+        from backend.database.postgres import AuditRecord
+        import json as _json
+        import uuid as _uuid
+        if SessionLocal:
+            db = SessionLocal()
+            try:
+                db.add(AuditRecord(
+                    audit_id=str(_uuid.uuid4()),
+                    investigation_id=investigation_id,
+                    action="entity_risk_auto_promoted",
+                    actor=source_agent,
+                    details=_json.dumps({
+                        "entity_id": update.entity_id,
+                        "entity_type": update.entity_type,
+                        "cumulative_risk": update.cumulative_risk,
+                        "threshold": update.threshold,
+                        "reason": update.reason,
+                    }),
+                ))
+                db.commit()
+            except Exception:
+                db.rollback()
+            finally:
+                db.close()
+    except Exception as e:
+        logger.debug(f"Entity-risk promotion audit write skipped: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +260,7 @@ class TriageAgent(BaseAgent):
         start = time.time()
         alert = context.alert_data
 
-        from backend.services.llm_client import get_llm, TriageOutput, verify_entities
+        from backend.services.llm_client import get_llm, TriageOutput, verify_entities, validate_triage_output
         from backend.services.prompt_manager import prompt_manager
         import json
         
@@ -216,11 +268,24 @@ class TriageAgent(BaseAgent):
         structured_llm = llm.with_structured_output(TriageOutput)
         
         system_prompt = prompt_manager.get_system_prompt("triage")
-        user_prompt = prompt_manager.build_user_prompt("triage", alert_json=json.dumps(alert, indent=2))
+        user_prompt = prompt_manager.build_user_prompt("triage", alert_json=wrap_untrusted(json.dumps(alert, indent=2), label="raw_alert"))
         prompt = f"{system_prompt}\n\n{user_prompt}"
         
         try:
+            # Structured-output validation with retry (Phase D, Step 4): re-invoke up to
+            # 2 additional times if severity/confidence/entity-type constraints are violated.
+            _t0 = time.time()
             result = await structured_llm.ainvoke(prompt)
+            violations = validate_triage_output(result)
+            _retry_count = 0
+            while violations and _retry_count < 2:
+                logger.warning(f"TriageAgent structured-output validation failed (attempt {_retry_count + 1}): {violations}. Retrying.")
+                result = await structured_llm.ainvoke(prompt)
+                violations = validate_triage_output(result)
+                _retry_count += 1
+            _latency_ms = int((time.time() - _t0) * 1000)
+            if violations:
+                raise ValueError(f"TriageOutput failed validation after retries: {violations}")
             findings = result.model_dump()
             
             # Ground entities against the original alert text
@@ -261,6 +326,110 @@ class TriageAgent(BaseAgent):
                 context.mitre_tactics = [findings["tactic"]]
             if findings.get("technique"):
                 context.mitre_techniques = [findings["technique"]]
+
+        # Model Router (Phase D, Step 1): deterministic ground-truth override.
+        # If a local threat-intel match exists (e.g. known ransomware extension/note),
+        # force severity/classification deterministically rather than trusting the LLM's
+        # guess — fixes the confirmed bug where indicators like known-ransomware files
+        # scored risk_score=0.1 with nothing to check against.
+        try:
+            from backend.services.model_router import model_router
+            routing = model_router.route("triage", {"alert_data": alert})
+            findings["routing_tier"] = routing.tier
+            if routing.tier == "deterministic" and routing.result:
+                findings["severity"] = routing.result["severity"]
+                findings["classification"] = routing.result["classification"]
+                findings["matched_intel"] = routing.result.get("matched_intel")
+                findings["routing_reasoning"] = routing.reasoning
+                context.classification = findings["classification"]
+                context.severity = findings["severity"]
+                confidence = max(confidence, routing.result.get("confidence", confidence))
+        except Exception as router_err:
+            logger.debug(f"Model router check skipped for triage: {router_err}")
+
+        # Entity-Risk Scoring full rollout (Wave 2, Phase G): feed this alert's
+        # per-entity severity contribution into the time-decayed cumulative risk
+        # tracker (QW-3), so repeated sub-critical activity against the same
+        # entity across multiple alerts/investigations is itself detected, even
+        # when no single alert crosses a severity threshold on its own.
+        try:
+            from backend.services.entity_risk import entity_risk_tracker, severity_to_risk_score
+            risk_score = severity_to_risk_score(findings.get("severity", "unknown"))
+            alert_id = alert.get("alert_id", "unknown")
+            newly_promoted_entities = []
+            for ent in findings.get("entities_identified", []):
+                eid = ent.get("id") if isinstance(ent, dict) else None
+                etype = ent.get("type", "unknown") if isinstance(ent, dict) else "unknown"
+                if not eid:
+                    continue
+                update = entity_risk_tracker.record_alert(
+                    entity_id=f"{etype}:{eid}",
+                    entity_type=etype,
+                    alert_id=alert_id,
+                    risk_score=risk_score,
+                )
+                if update.newly_promoted:
+                    newly_promoted_entities.append(update)
+            for update in newly_promoted_entities:
+                _escalate_entity_promotion(context, update, source_agent=self.name)
+        except Exception as risk_err:
+            logger.debug(f"Entity-risk scoring skipped for triage: {risk_err}")
+
+        # Compounding Memory (Wave 3, Phase J): apply a small, bounded (+/-0.10)
+        # confidence adjustment based on how this alert signature (classification
+        # + tactic + technique) has historically resolved (false positive vs
+        # confirmed incident) across past investigations. Returns 0.0 (no effect)
+        # for unseen/insufficiently-seen signatures -- never overrides the
+        # LLM/ground-truth confidence, only nudges it, and the adjustment is
+        # always recorded in findings for auditability.
+        try:
+            from backend.services.memory.distillation import compounding_memory, build_alert_signature
+            alert_signature = build_alert_signature(
+                findings.get("classification", "unknown"),
+                findings.get("tactic", ""),
+                findings.get("technique", ""),
+            )
+            memory_adjustment = compounding_memory.get_memory_verdict_adjustment(alert_signature)
+            if memory_adjustment:
+                confidence = max(0.0, min(1.0, confidence + memory_adjustment))
+            findings["alert_signature"] = alert_signature
+            findings["memory_adjustment"] = memory_adjustment
+        except Exception as memory_err:
+            logger.debug(f"Compounding memory adjustment skipped for triage: {memory_err}")
+
+        # Security Knowledge Graph at Ingest (Wave 3, Phase M, narrowly scoped):
+        # write the user->host->process relationships for this alert to Neo4j
+        # as it arrives, rather than only when an investigation later queries
+        # them. Best-effort/no-op if Neo4j isn't configured -- never blocks
+        # triage.
+        try:
+            from backend.services.graph_ingest import record_user_host_process
+            await record_user_host_process(
+                user_id=alert.get("user_name"),
+                host_id=alert.get("computer_name"),
+                process_id=alert.get("process_id") or alert.get("process_name"),
+                process_name=alert.get("process_name"),
+                timestamp=alert.get("timestamp"),
+            )
+        except Exception as graph_err:
+            logger.debug(f"Graph ingest skipped for triage: {graph_err}")
+
+        try:
+            from backend.services.investigation_ledger import record_ledger_entry
+            from backend.services.llm_client import MODEL_ROUTING, DEFAULT_MODEL
+            record_ledger_entry(
+                investigation_id=getattr(context, "investigation_id", None) or alert.get("alert_id", "unknown"),
+                agent_name=self.name,
+                phase="triage",
+                prompt_sent=prompt,
+                llm_response=json.dumps(findings, default=str),
+                model_used=findings.get("routing_tier", "llm") if findings.get("routing_tier") == "deterministic" else MODEL_ROUTING.get("triage", DEFAULT_MODEL),
+                decision=findings,
+                skills_invoked=findings.get("skills_used", []),
+                latency_ms=locals().get("_latency_ms", 0),
+            )
+        except Exception as ledger_err:
+            logger.debug(f"Ledger recording skipped for triage: {ledger_err}")
 
         return AgentReport(
             agent_name=self.name,
@@ -435,6 +604,30 @@ class EvidenceAgent(BaseAgent):
         # Update context
         context.entity_graph = entity_graph
         context.relationships = unique_rels
+
+        # Entity-Risk Scoring full rollout (Wave 2, Phase G): Evidence-phase entities
+        # carry their own risk_score from evidence skills (threat-intel matches, YARA/VT
+        # hits, etc.) -- feed each into the same cumulative tracker used by Triage, so
+        # evidence-derived risk signals also contribute toward auto-promotion.
+        try:
+            from backend.services.entity_risk import entity_risk_tracker
+            alert_id = context.alert_data.get("alert_id", "unknown") if context.alert_data else "unknown"
+            for eid, edata in entity_graph.items():
+                if not isinstance(edata, dict):
+                    continue
+                risk_score = edata.get("risk_score", 0.0)
+                if risk_score <= 0:
+                    continue
+                update = entity_risk_tracker.record_alert(
+                    entity_id=eid,
+                    entity_type=edata.get("type", "unknown"),
+                    alert_id=alert_id,
+                    risk_score=risk_score,
+                )
+                if update.newly_promoted:
+                    _escalate_entity_promotion(context, update, source_agent=self.name)
+        except Exception as risk_err:
+            logger.debug(f"Entity-risk scoring skipped for evidence: {risk_err}")
 
         high_risk_iocs = [
             f"{k.replace('file:', '').replace('ip:', '').replace('host:', '').replace('user:', '')} (Risk: {v.get('risk_score', 0)})"
@@ -727,9 +920,27 @@ class CompressionAgent(BaseAgent):
                     "Identify key phases (e.g. Initial Access, Discovery, Lateral Movement). Ensure actions are clear and descriptive.\n\n"
                     f"Events: {json.dumps(package.timeline)}"
                 )
+                _t0 = time.time()
                 res = await structured_llm.ainvoke(prompt)
+                _latency_ms = int((time.time() - _t0) * 1000)
                 if res and res.timeline:
                     final_timeline = [e.model_dump() if hasattr(e, "model_dump") else e.dict() for e in res.timeline]
+
+                try:
+                    from backend.services.investigation_ledger import record_ledger_entry
+                    from backend.services.llm_client import MODEL_ROUTING, DEFAULT_MODEL
+                    record_ledger_entry(
+                        investigation_id=getattr(context, "investigation_id", None) or context.alert_data.get("alert_id", "unknown"),
+                        agent_name=self.name,
+                        phase="compression",
+                        prompt_sent=prompt,
+                        llm_response=json.dumps(final_timeline, default=str),
+                        model_used=MODEL_ROUTING.get("summarizer", DEFAULT_MODEL),
+                        decision={"timeline_events": len(final_timeline)},
+                        latency_ms=_latency_ms,
+                    )
+                except Exception as ledger_err:
+                    logger.debug(f"Ledger recording skipped for compression: {ledger_err}")
             except Exception as e:
                 logger.error(f"Failed to generate semantic timeline: {e}")
 
@@ -921,15 +1132,17 @@ class RCAAnalystAgent(BaseAgent):
         user_prompt = prompt_manager.build_user_prompt(
             "rca",
             classification=classification,
-            entity_graph_json=eg_str,
+            entity_graph_json=wrap_untrusted(eg_str, label="entity_graph"),
             causal_analysis_json=json.dumps(causal_candidates[:3], separators=(',', ':')),
-            historical_context=historical_context[:300],
+            historical_context=wrap_untrusted(historical_context[:300], label="retrieved_history"),
             messages_json="[]"  # omit to save tokens; causal candidates carry the same signal
         )
         prompt = f"{system_prompt}\n\n{user_prompt}"
 
         try:
+            _t0 = time.time()
             result = await structured_llm.ainvoke(prompt)
+            _latency_ms = int((time.time() - _t0) * 1000)
             findings = result.model_dump()
             confidence = findings.get("confidence", 0.85)
             findings["prompt_version"] = prompt_manager.get_prompt_metadata("rca")["version"]
@@ -979,7 +1192,24 @@ class RCAAnalystAgent(BaseAgent):
             
             context.rca_findings = findings
             context.rca_findings["confidence_score"] = confidence
-            
+
+            try:
+                from backend.services.investigation_ledger import record_ledger_entry
+                from backend.services.llm_client import MODEL_ROUTING, DEFAULT_MODEL
+                record_ledger_entry(
+                    investigation_id=getattr(context, "investigation_id", None) or context.alert_data.get("alert_id", "unknown"),
+                    agent_name=self.name,
+                    phase="rca",
+                    prompt_sent=prompt,
+                    llm_response=json.dumps(findings, default=str),
+                    model_used=MODEL_ROUTING.get("rca", DEFAULT_MODEL),
+                    decision=findings,
+                    evidence_cited=[c.get("candidate_entity") for c in causal_candidates[:3]],
+                    latency_ms=locals().get("_latency_ms", 0),
+                )
+            except Exception as ledger_err:
+                logger.debug(f"Ledger recording skipped for rca: {ledger_err}")
+
         except Exception as e:
             logger.warning(f"RCAAnalystAgent LLM error: {e}. Applying structural causal fallback.")
             root_cause_candidate = causal_candidates[0]["candidate_entity"] if causal_candidates else "Unknown Root Cause"
@@ -1079,7 +1309,7 @@ class ResponsePlannerAgent(BaseAgent):
             root_cause=root_cause,
             attack_chain=attack_chain[:5] if isinstance(attack_chain, list) else attack_chain,
             entities_json=entities_str,
-            playbook_context=playbook_context,
+            playbook_context=wrap_untrusted(playbook_context, label="retrieved_playbook"),
             messages_json=messages_json[:500] if messages_json != "[]" else "[]"
         )
         prompt = f"{system_prompt}\n\n{user_prompt}"
@@ -1114,6 +1344,22 @@ class ResponsePlannerAgent(BaseAgent):
                         payload={"reason": "Cannot generate safe response plan based on very low confidence RCA."}
                     )
             confidence = findings.get("confidence", 0.90) if findings.get("confidence") is not None else 0.90
+
+            try:
+                from backend.services.investigation_ledger import record_ledger_entry
+                from backend.services.llm_client import MODEL_ROUTING, DEFAULT_MODEL
+                record_ledger_entry(
+                    investigation_id=getattr(context, "investigation_id", None) or context.alert_data.get("alert_id", "unknown"),
+                    agent_name=self.name,
+                    phase="response",
+                    prompt_sent=prompt,
+                    llm_response=json.dumps(findings, default=str),
+                    model_used=MODEL_ROUTING.get("response", DEFAULT_MODEL),
+                    decision=findings,
+                    skills_invoked=skills_used,
+                )
+            except Exception as ledger_err:
+                logger.debug(f"Ledger recording skipped for response: {ledger_err}")
         except Exception as e:
             logger.warning(f"ResponsePlannerAgent LLM error: {e}. Generating rule-based response actions.")
             fallback_actions = []
@@ -1239,6 +1485,70 @@ class OrchestratorAgent:
         run_id = f"run-{uuid.uuid4().hex[:8]}"
         run_start = time.time()
         context = InvestigationContext(alert_data=alert_data, use_ai_planner=False)
+
+        # Playbook Engine (Wave 3, Phase K): if a declarative playbook's trigger
+        # matches this alert (severity + tags), it takes precedence over the
+        # static 5-phase plan for this run -- e.g. the ransomware-response-v1
+        # playbook isolates the host first, then investigates, notifies, and
+        # reports. Any exception here falls straight through to the unchanged
+        # static plan below (zero regression for the common/no-match case).
+        try:
+            from backend.services.pipeline_core import find_matching_playbook
+            from backend.services.playbook_engine import playbook_engine
+            matched_playbook = find_matching_playbook(alert_data)
+        except Exception as playbook_lookup_err:
+            logger.debug(f"Playbook lookup skipped: {playbook_lookup_err}")
+            matched_playbook = None
+
+        if matched_playbook is not None:
+            yield sse_event("run_start", {
+                "run_id": run_id,
+                "task": task,
+                "status": "planning",
+                "mode": "playbook",
+                "playbook_id": matched_playbook.id,
+                "playbook_name": matched_playbook.name,
+                "timestamp": datetime.now().isoformat(),
+            })
+            yield sse_event("playbook_engaged", {
+                "run_id": run_id,
+                "playbook_id": matched_playbook.id,
+                "playbook_name": matched_playbook.name,
+                "steps": [{"id": s.id, "name": s.name, "type": s.type} for s in matched_playbook.steps],
+            })
+
+            try:
+                exec_result = await playbook_engine.execute_playbook(matched_playbook, context)
+            except Exception as playbook_exec_err:
+                logger.warning(f"Playbook execution failed, falling back to static plan: {playbook_exec_err}")
+                exec_result = None
+
+            if exec_result is not None:
+                all_reports: Dict[str, AgentReport] = {}
+                for step_result in exec_result.step_results:
+                    yield sse_event("playbook_step_complete", {
+                        "run_id": run_id,
+                        "step_id": step_result.step_id,
+                        "step_name": step_result.step_name,
+                        "status": step_result.status,
+                        "retried": step_result.retried,
+                    })
+                    detail = step_result.detail if isinstance(step_result.detail, dict) else {}
+                    for task_id, report in (detail.get("reports") or {}).items():
+                        all_reports[task_id] = report
+
+                yield sse_event("synthesis_start", {"run_id": run_id, "timestamp": datetime.now().isoformat()})
+                synthesis = self._synthesize(all_reports, None, context)
+                total_duration = int((time.time() - run_start) * 1000)
+                yield sse_event("run_complete", {
+                    "run_id": run_id,
+                    "status": "aborted" if exec_result.aborted else "completed",
+                    "total_duration_ms": total_duration,
+                    "synthesis": synthesis,
+                    "playbook_id": matched_playbook.id,
+                    "timestamp": datetime.now().isoformat(),
+                })
+                return
 
         # Planning Phase
         yield sse_event("run_start", {

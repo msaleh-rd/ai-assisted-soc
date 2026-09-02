@@ -1,8 +1,8 @@
-D:\projects\ai-assisted-soc# AI-Native SOC Platform - Phase 1 Implementation
+D:\projects\ai-assisted-soc# AI-Native SOC Platform
 
 ## Overview
 
-This is a partial implementation of the AI-Native SOC Platform focusing on **Phase 1: Alert Intake & Evidence Collection**.
+This codebase implements an AI-Native SOC Platform. **Phases 1-3** (Alert Intake, Evidence Collection, Correlation/Compression, RCA & Response Orchestration) are complete, as is the full **Wave 0-3** program from [DETAILED_IMPLEMENTATION_PLAN.md](DETAILED_IMPLEMENTATION_PLAN.md) (deterministic threat-intel grounding, an auditable Investigation Ledger, a multi-model router, agentic-security hardening, the L0-L4 Automation Maturity Gate, Detection-as-Code, an Investigation Swarm, Compounding Memory, a declarative Playbook Engine, a Self-Play Purple Team, and ingest-time security knowledge graph writes). Wave 4 (enterprise integrations, production hardening, scalability) is scoped but paused pending real vendor credentials/infrastructure decisions — see [ROADMAP.md](ROADMAP.md) and [DETAILED_IMPLEMENTATION_PLAN.md](DETAILED_IMPLEMENTATION_PLAN.md) for full status.
 
 The platform is designed to:
 1. **Ingest** security alerts from multiple sources (CrowdStrike, Splunk, etc.)
@@ -10,6 +10,20 @@ The platform is designed to:
 3. **Deduplicate** similar alerts within a configurable window
 4. **Autonomously collect** evidence by expanding entities across telemetry sources
 5. **Enrich** context with threat intelligence and baseline comparisons
+6. **Reason** over that evidence via an auditable, self-correcting agentic pipeline (Triage → Evidence → Compression → RCA → Response), grounded in local threat-intel and gated by a blast-radius-aware automation policy
+
+## Current Status (2026-09-02)
+
+| Area | Status |
+|---|---|
+| Alert Intake, Evidence Collection, Correlation/Compression, RCA, Response Orchestration (Phases 1-3) | ✅ Complete |
+| Local threat-intel grounding, Investigation Ledger, Multi-model router, Agentic security hardening (Wave 1) | ✅ Complete |
+| Maturity Gate + Entity-Risk full rollout, Detection-as-Code + Live Actions (Wave 2) | ✅ Complete |
+| Investigation Swarm, Compounding Memory, Playbook Engine, Self-Play Purple Team, Security Knowledge Graph (Wave 3) | ✅ Complete |
+| AI Governance UI page + read-only API surfacing all of the above | ✅ Complete |
+| Enterprise integrations, AuthN/RBAC, Kubernetes/multi-tenancy (Wave 4) | ⏸️ Paused (needs real credentials/infra decisions) |
+
+**Regression baseline:** 380 backend tests passing (`pytest backend/tests/`, excluding 3 files that require a live LM Studio/Temporal server), zero known regressions.
 
 ## Architecture
 
@@ -230,6 +244,16 @@ for entity_id, entity in context['entities'].items():
 - **Neo4j ready**: Graph prepared for storage in Neo4j
 - **MITRE ATT&CK mapping**: Alert categories aligned with tactics
 
+### 5. AI Governance & Reasoning Safety (Wave 1-3)
+- **Investigation Ledger**: every agentic LLM decision (prompt, response, decision, token/latency cost) recorded and replayable per investigation.
+- **Local Threat-Intel Grounding**: deterministic ransomware/mutex/port/note lookups (vendored from `mthcht/awesome-lists`) checked before/alongside any LLM call.
+- **L0-L4 Automation Maturity Gate**: every response skill is blast-radius-scored and gated by the configured automation tier before auto-executing.
+- **Detection-as-Code**: YAML-defined, fixture-tested rules (`backend/detections/`) evaluated by a real `DetectionEngine`.
+- **Playbook Engine**: declarative YAML incident-response playbooks (`backend/playbooks/`) that can drive the real Triage/Evidence/Compression/RCA/Response agents end-to-end.
+- **Investigation Swarm & Compounding Memory**: parallel competing-hypothesis generation for stuck/complex cases, plus per-alert-signature false-positive priors that bound Triage's confidence.
+- **Self-Play Purple Team**: replays canned attack campaigns against the real detection ruleset and auto-drafts coverage-gap rules for review.
+- All of the above are now visible and operable from the frontend's **AI Governance** page, backed by a new read-only `backend/api/routes/ai_governance.py` API (`/api/v1/ai-governance/*`).
+
 ## Data Flow Example
 
 ### CrowdStrike "Suspicious PowerShell" Alert
@@ -364,6 +388,23 @@ Phase 2 successfully introduced the AI-driven investigation capabilities:
    - Natively supports the open **agentskills.io** standard.
    - Automatically maps skills to MITRE ATT&CK and NIST CSF frameworks.
    - Instant integration of 800+ open-source cybersecurity skills.
+
+## Completed: Phase 3 & Wave 1-3 (RCA, Response, AI Reasoning & Safety)
+
+Phase 3 wired real RCA (`sx_truerca` causal analysis + LLM synthesis) and response
+orchestration (Maturity Gate, kill-switch, audit trail) into the pipeline. The
+subsequent Wave 0-3 program (see [DETAILED_IMPLEMENTATION_PLAN.md](DETAILED_IMPLEMENTATION_PLAN.md))
+then hardened and scaled the agentic core:
+
+- **Wave 0 (Quick Wins)**: Prompt Registry with few-shot injection + lockfile versioning; the L0-L4 Automation Maturity Gate; time-decayed Entity-Risk scoring with auto-promotion.
+- **Wave 1**: local threat-intel grounding (Phase A); YARA/VirusTotal malware-analysis evidence (Phase B); the replayable Investigation Ledger (Phase C); the multi-model router, LLM response caching, rate limiting and structured-output validation (Phase D); agentic-security hardening against prompt injection/goal drift with a kill switch (Phase E).
+- **Wave 2**: full Maturity Gate + Entity-Risk rollout across every response/triage/evidence call site (Phases F/G); Detection-as-Code rules plus a Live Actions dispatch registry (Phase H).
+- **Wave 3**: an Investigation Swarm for stuck/complex cases (Phase I); Compounding Memory learning per-signature false-positive priors (Phase J); a declarative Playbook Engine (Phase K); a Self-Play Purple Team that red-teams the detection ruleset (Phase L); ingest-time Security Knowledge Graph writes with blast-radius queries (Phase M).
+- **AI Governance UI**: a new frontend page + read-only API making every one of the above subsystems observable and operable, not just backend-internal.
+
+Wave 4 (enterprise tool integrations, production hardening, Kubernetes/multi-tenancy)
+is scoped in detail in [DETAILED_IMPLEMENTATION_PLAN.md](DETAILED_IMPLEMENTATION_PLAN.md)
+but intentionally paused pending real vendor credentials and infrastructure decisions.
 
 2. **AI Planner & ReAct Supervisor**
    - Dynamic orchestrator evaluates evidence at every step.

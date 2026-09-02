@@ -13,6 +13,9 @@ from collections import Counter
 
 from backend.database.connection import SessionLocal
 from backend.database.postgres import EntityRecord, EventRecord
+from backend.services.threat_intel.local_feeds import local_threat_intel_db
+from backend.services.evidence.yara_scanner import yara_scanner
+from backend.services.evidence.virustotal_client import virustotal_client
 
 logger = logging.getLogger("evidence-skills")
 
@@ -28,6 +31,15 @@ class EvidenceSkillExecutor:
         context_data: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Execute a specific evidence skill for an entity."""
+        # Tool-call authorization boundary (Phase E, Step 3): every skill invocation
+        # goes through a single choke point rather than being called ad hoc.
+        try:
+            from backend.services.agentic_security import skill_authorization_gate
+            investigation_id = (context_data or {}).get("investigation_id", "unknown")
+            skill_authorization_gate.authorize(skill_name, phase="evidence", investigation_id=investigation_id)
+        except Exception as auth_err:
+            logger.debug(f"Skill authorization check skipped for {skill_name}: {auth_err}")
+
         handler_map = {
             "edr-process-tree": EvidenceSkillExecutor._handle_edr_process_tree,
             "network-flow-analyzer": EvidenceSkillExecutor._handle_network_flow,
@@ -92,6 +104,68 @@ class EvidenceSkillExecutor:
             return 0.1
         risks = [e.get("risk_score", 0.1) for e in events]
         return round(max(risks), 2)
+
+    # ------------------------------------------------------------------
+    # Static malware analysis helpers (Phase B: YARA + optional VirusTotal)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_sha256(value: str) -> bool:
+        value = value.strip()
+        return len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value)
+
+    @staticmethod
+    async def _run_static_malware_analysis(entity_id: str, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """Run YARA rule matching (and optional VirusTotal hash lookup) against
+        whatever file content/hash is actually available for this entity.
+
+        Returns a dict with `yara_matches` (list) and `vt_result` (dict or None).
+        Both are empty/None when no real file bytes or hash are available —
+        this is expected for most log-derived file entities and is not an error.
+        """
+        yara_matches: List[Dict[str, Any]] = []
+        vt_result: Optional[Dict[str, Any]] = None
+
+        # Resolve scannable content: explicit bytes/content in context, or a real
+        # file path on disk (e.g. a quarantined sample fetched from EDR).
+        file_content = ctx.get("file_content") or ctx.get("raw_bytes")
+        if file_content is not None:
+            if isinstance(file_content, str):
+                file_content = file_content.encode("utf-8", errors="ignore")
+            matches = yara_scanner.scan_file(file_content)
+        else:
+            matches = yara_scanner.scan_file(entity_id)
+
+        for m in matches:
+            yara_matches.append({
+                "rule_name": m.rule_name,
+                "category": m.category,
+                "severity": m.severity,
+                "description": m.description,
+                "mitre_attack": m.mitre_attack,
+                "matched_strings": m.matched_strings,
+            })
+
+        # Resolve a SHA256 for optional VirusTotal lookup.
+        sha256 = ctx.get("sha256") or ctx.get("file_hash")
+        if not sha256 and EvidenceSkillExecutor._is_sha256(entity_id):
+            sha256 = entity_id
+
+        if sha256 and virustotal_client.is_enabled:
+            vt = await virustotal_client.lookup_hash(sha256)
+            if vt:
+                vt_result = {
+                    "sha256": vt.sha256,
+                    "malicious_count": vt.malicious_count,
+                    "total_engines": vt.total_engines,
+                    "detection_ratio": vt.detection_ratio,
+                    "detected_names": vt.detected_names,
+                    "reputation": vt.reputation,
+                    "permalink": vt.permalink,
+                    "is_known_malicious": vt.is_known_malicious,
+                }
+
+        return {"yara_matches": yara_matches, "vt_result": vt_result}
 
     # ------------------------------------------------------------------
     # Skill: EDR Process Tree
@@ -265,6 +339,26 @@ class EvidenceSkillExecutor:
             has_alerts = alert_count > 0
             high_volume = total_bytes_out > 1_000_000
 
+            # Ground-truth check: destination ports against the locally-vendored
+            # suspicious-ports feed (deterministic, no LLM guesswork).
+            port_matches = []
+            for port in dest_ports:
+                try:
+                    port_match = local_threat_intel_db.lookup_port(int(port))
+                except (TypeError, ValueError):
+                    port_match = None
+                if port_match:
+                    port_matches.append({
+                        "port": port,
+                        "category": port_match.category,
+                        "confidence": port_match.confidence,
+                        "detail": port_match.detail,
+                        "source_list": port_match.source_list,
+                    })
+            has_suspicious_ports = len(port_matches) > 0
+            if has_suspicious_ports:
+                risk = max(risk, max(m["confidence"] for m in port_matches))
+
             return {
                 "enrichment_data": {
                     "target_ip": entity_id,
@@ -287,9 +381,11 @@ class EvidenceSkillExecutor:
                     "malware_c2": has_alerts or (not is_private and risk >= 0.7),
                     "evidence_source": "suricata_eve_json",
                     "total_events_analyzed": len(flow_events),
+                    "suspicious_ports_matched": port_matches,
+                    "local_threat_intel_source": "local_threat_intel_db" if has_suspicious_ports else None,
                 },
-                "risk_score": max(risk, 0.85) if (has_alerts or not is_private) else min(risk, 0.5),
-                "is_known_malicious": has_alerts or not is_private,
+                "risk_score": max(risk, 0.85) if (has_alerts or not is_private or has_suspicious_ports) else min(risk, 0.5),
+                "is_known_malicious": has_alerts or not is_private or has_suspicious_ports,
             }
 
         # Tier 3: Minimal fallback
@@ -404,6 +500,46 @@ class EvidenceSkillExecutor:
         if db_data:
             return db_data
 
+        # Tier 1.5: Ground-truth check against locally-vendored feeds (deterministic,
+        # no LLM guesswork) — covers file extensions/notes and suspicious ports.
+        if entity_type in ("file", "filename", "filepath", "file_path"):
+            ext_match = local_threat_intel_db.lookup_extension(entity_id)
+            note_match = None if ext_match else local_threat_intel_db.lookup_ransomware_note(entity_id)
+            intel_match = ext_match or note_match
+            if intel_match:
+                return {
+                    "enrichment_data": {"ioc": entity_id, "ioc_type": entity_type},
+                    "threat_intel": {
+                        "is_known_malicious": True,
+                        "reputation_score": int(intel_match.confidence * 100),
+                        "category": intel_match.category,
+                        "detail": intel_match.detail,
+                        "evidence_source": intel_match.source,
+                        "source_list": intel_match.source_list,
+                    },
+                    "risk_score": intel_match.confidence,
+                    "is_known_malicious": True,
+                }
+        elif entity_type == "port":
+            try:
+                port_match = local_threat_intel_db.lookup_port(int(entity_id))
+            except (TypeError, ValueError):
+                port_match = None
+            if port_match:
+                return {
+                    "enrichment_data": {"ioc": entity_id, "ioc_type": entity_type},
+                    "threat_intel": {
+                        "is_known_malicious": port_match.confidence >= 0.7,
+                        "reputation_score": int(port_match.confidence * 100),
+                        "category": port_match.category,
+                        "detail": port_match.detail,
+                        "evidence_source": port_match.source,
+                        "source_list": port_match.source_list,
+                    },
+                    "risk_score": port_match.confidence,
+                    "is_known_malicious": port_match.confidence >= 0.7,
+                }
+
         # Tier 2: Cross-reference across all log sources
         ingestor = EvidenceSkillExecutor._get_ingestor()
         all_events = ingestor.search_entity(entity_id, entity_type, max_results=100)
@@ -481,6 +617,36 @@ class EvidenceSkillExecutor:
         db_data = EvidenceSkillExecutor._fetch_db_record(entity_id)
         if db_data:
             return db_data
+
+        # Tier 1.5: Static malware analysis (YARA + optional VirusTotal) against
+        # any real file content/hash available for this entity — deterministic
+        # ground truth that takes priority over log-derived heuristics below.
+        static_analysis = await EvidenceSkillExecutor._run_static_malware_analysis(entity_id, ctx)
+        yara_matches = static_analysis["yara_matches"]
+        vt_result = static_analysis["vt_result"]
+        vt_malicious = bool(vt_result and vt_result["is_known_malicious"])
+
+        if yara_matches or vt_malicious:
+            max_severity_risk = 0.95 if any(m["severity"] == "critical" for m in yara_matches) else 0.75
+            risk = max(max_severity_risk, vt_result["detection_ratio"] if vt_result else 0.0)
+            return {
+                "enrichment_data": {
+                    "file_name": entity_id,
+                    "file_path": entity_id,
+                },
+                "threat_intel": {
+                    "is_known_malicious": True,
+                    "known_malware": True,
+                    "signed": False,
+                    "evidence_source": "yara_static_analysis" if yara_matches else "virustotal",
+                },
+                "static_analysis": {
+                    "yara_matches": yara_matches,
+                    "vt_result": vt_result,
+                },
+                "risk_score": risk,
+                "is_known_malicious": True,
+            }
 
         # Tier 2: Search audit logs for file access/execution events
         ingestor = EvidenceSkillExecutor._get_ingestor()
@@ -604,6 +770,22 @@ class EvidenceSkillExecutor:
             elif len(suspicious_scripts) > 0:
                 risk = 0.6
 
+            # Ground-truth check: systemd services and script paths against the
+            # locally-vendored suspicious-mutex feed (malware often reuses its mutex
+            # name as a service/artifact name for persistence).
+            mutex_hits = []
+            for svc in systemd_services:
+                svc_name = svc if isinstance(svc, str) else str(svc)
+                m = local_threat_intel_db.lookup_mutex(svc_name)
+                if m:
+                    mutex_hits.append({"artifact": svc_name, "artifact_type": "systemd_service", "detail": m.detail, "confidence": m.confidence, "source_list": m.source_list})
+            for script_path in script_paths:
+                m = local_threat_intel_db.lookup_mutex(script_path)
+                if m:
+                    mutex_hits.append({"artifact": script_path, "artifact_type": "script", "detail": m.detail, "confidence": m.confidence, "source_list": m.source_list})
+            if mutex_hits:
+                risk = max(risk, max(h["confidence"] for h in mutex_hits))
+
             return {
                 "enrichment_data": {
                     "os": detected_os,
@@ -619,9 +801,10 @@ class EvidenceSkillExecutor:
                     "persistence_score": risk,
                     "technique": "T1053.003 - Scheduled Task/Job: Cron" if cron_entries or suspicious_scripts else "None detected",
                     "evidence_source": "host_log_analysis",
+                    "known_malware_artifacts": mutex_hits,
                 },
                 "risk_score": risk,
-                "is_suspicious": len(suspicious_scripts) > 0,
+                "is_suspicious": len(suspicious_scripts) > 0 or len(mutex_hits) > 0,
             }
 
         # Tier 3: Minimal fallback

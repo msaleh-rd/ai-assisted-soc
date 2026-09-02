@@ -18,6 +18,8 @@ import hashlib
 import json
 import asyncio
 from collections import defaultdict
+
+from backend.services.threat_intel.local_feeds import local_threat_intel_db
 import numpy as np
 from abc import ABC, abstractmethod
 from backend.services.mitre_mapper import MitreTechnique, mitre_mapper
@@ -348,9 +350,16 @@ class BehavioralFilter:
     
     def _calculate_anomaly_score(self, event: CorrelatedEvent) -> float:
         """Calculate anomaly score for event (0-1)."""
-        
+
         entity_id = event.entity_id
-        
+
+        # Ground-truth check first: locally-vendored threat-intel indicators (ransomware
+        # extensions/notes, suspicious mutex names) must never be filtered out as "normal"
+        # baseline behavior, no matter how statistically routine they look.
+        intel_score = self._check_local_threat_intel(event)
+        if intel_score is not None:
+            return intel_score
+
         # Check against entity baseline if exists
         if entity_id in self.baselines:
             baseline = self.baselines[entity_id]
@@ -376,6 +385,29 @@ class BehavioralFilter:
         
         # Truly unknown - return moderate score
         return 0.5
+
+    @staticmethod
+    def _check_local_threat_intel(event: CorrelatedEvent) -> Optional[float]:
+        """Scan an event's raw payloads for known ransomware extensions/notes or malware
+        mutex names. Returns a high confidence score if a deterministic match is found,
+        otherwise None (fall through to statistical scoring).
+        """
+        candidates: List[str] = [str(event.entity_id), str(event.action)]
+        for raw in event.raw_events:
+            if not isinstance(raw, dict):
+                continue
+            for v in raw.values():
+                if isinstance(v, str) and v.strip():
+                    candidates.append(v.strip())
+                elif isinstance(v, list):
+                    candidates.extend(str(x).strip() for x in v if str(x).strip())
+
+        for candidate in candidates:
+            if local_threat_intel_db.lookup_extension(candidate) or \
+               local_threat_intel_db.lookup_ransomware_note(candidate) or \
+               local_threat_intel_db.lookup_mutex(candidate):
+                return 0.99
+        return None
 
 
 class EventDeduplicator:

@@ -1,0 +1,24 @@
+{
+  "positive": [
+    {
+      "event_type": "process_execution",
+      "risk_score": 0.85,
+      "entity": "HOST-001",
+      "action": "powershell.exe -enc <base64>"
+    }
+  ],
+  "negative": [
+    {
+      "event_type": "process_execution",
+      "risk_score": 0.2,
+      "entity": "HOST-002",
+      "action": "notepad.exe"
+    },
+    {
+      "event_type": "heartbeat",
+      "risk_score": 0.9,
+      "entity": "HOST-003",
+      "note": "Excluded event_type despite high risk_score."
+    }
+  ]
+}

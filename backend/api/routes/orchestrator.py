@@ -673,6 +673,36 @@ async def get_investigation_details(investigation_id: str):
 
     return detail
 
+
+@router.get("/investigations/{investigation_id}/ledger")
+async def get_investigation_ledger(investigation_id: str):
+    """
+    Retrieve the full replayable Investigation Ledger for an investigation:
+    every agentic LLM call (supervisor decisions, triage/RCA/response synthesis,
+    compression semantic summarization) in order, including the exact prompt
+    sent, the model's response, and the resulting structured decision.
+    """
+    from backend.services.investigation_ledger import investigation_ledger
+
+    entries = investigation_ledger.replay(investigation_id)
+    return {
+        "investigation_id": investigation_id,
+        "total_steps": len(entries),
+        "entries": [e.to_dict() for e in entries],
+    }
+
+
+@router.get("/investigations/{investigation_id}/ledger/cost")
+async def get_investigation_ledger_cost(investigation_id: str):
+    """
+    Retrieve an aggregated token/latency cost breakdown (overall and per-agent)
+    for an investigation, derived from its Investigation Ledger entries.
+    """
+    from backend.services.investigation_ledger import investigation_ledger
+
+    return investigation_ledger.get_cost_summary(investigation_id)
+
+
 @router.get("/approvals/pending")
 async def list_pending_approvals():
     """

@@ -1,0 +1,26 @@
+id: high-risk-scored-event
+name: "High-Risk-Scored Endpoint Event"
+severity: high
+category: endpoint
+tags:
+  - "mitre.attack.TA0002"
+log_source: edr
+
+# First proof-of-pattern migration of correlation_engine.py's inline
+# high-risk-event filtering logic (events with risk_score >= 0.6 are already
+# treated as significant by CorrelationEngine._aggregate_entity_events and
+# AnomalyDetector) into an explicit, reviewable, testable YAML rule.
+detection:
+  condition: "all"
+  rules:
+    - field: risk_score
+      op: gte
+      value: 0.6
+    - field: event_type
+      op: not_equals
+      value: heartbeat
+
+false_positives: >
+  Vulnerability-scanning or authorized red-team activity can also produce
+  high risk_score telemetry -- check against known scan windows/source hosts.
+playbook: null

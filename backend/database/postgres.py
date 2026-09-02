@@ -47,6 +47,16 @@ class InvestigationRecord(Base):
     compression_ratio = Column(Float)
     raw_events_count = Column(Integer)
     compressed_events_count = Column(Integer)
+    # Wave 3, Phase J (Compounding Memory): resolved-case verdict + alert signature,
+    # so historical false-positive/confirmed-incident rates become queryable per
+    # signature. NOTE: no Alembic migration versions/ dir exists in this repo yet
+    # (same limitation documented for EntityRiskRecord in Wave 0/QW-3) -- these
+    # columns rely on Base.metadata.create_all(), which only creates NEW tables and
+    # will NOT retroactively add columns to an already-existing `investigations`
+    # table in a previously-deployed database; a real deployment would need an
+    # actual ALTER TABLE / Alembic migration for that case.
+    verdict = Column(String(50), index=True)
+    alert_signature = Column(String(255), index=True)
     started_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -104,6 +114,22 @@ class AuditRecord(Base):
     timestamp = Column(DateTime, index=True, default=datetime.utcnow)
 
 
+class EntityRiskRecord(Base):
+    """PostgreSQL model for time-decayed cumulative entity risk scores."""
+    __tablename__ = "entity_risk_scores"
+
+    entity_id = Column(String(255), primary_key=True)
+    entity_type = Column(String(50), index=True)
+    cumulative_risk = Column(Float, default=0.0)
+    contributing_alert_ids = Column(JSON)
+    promoted = Column(Boolean, default=False)
+    promoted_at = Column(DateTime)
+    investigation_id = Column(String(36), index=True)
+    last_updated = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class RCAResultRecord(Base):
     """PostgreSQL model for Root Cause Analysis results."""
     __tablename__ = "rca_results"
@@ -113,6 +139,34 @@ class RCAResultRecord(Base):
     root_cause = Column(Text)
     attack_chain = Column(JSON)  # List of steps
     confidence = Column(Float, default=0.0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class InvestigationLedgerRecord(Base):
+    """PostgreSQL model for the persistent, replayable investigation decision ledger.
+
+    Every agentic LLM call (supervisor decisions, triage/RCA/response synthesis,
+    compression semantic summarization) writes one row here, allowing an entire
+    investigation to be replayed and audited after the fact.
+    """
+    __tablename__ = "investigation_ledger_entries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    investigation_id = Column(String(36), index=True)
+    step_index = Column(Integer, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    agent_name = Column(String(100))
+    phase = Column(String(50), index=True)
+    prompt_sent = Column(Text)
+    prompt_hash = Column(String(64), index=True)
+    llm_response = Column(Text)
+    model_used = Column(String(100))
+    decision = Column(JSON)
+    evidence_cited = Column(JSON)
+    skills_invoked = Column(JSON)
+    tokens_in = Column(Integer, default=0)
+    tokens_out = Column(Integer, default=0)
+    latency_ms = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

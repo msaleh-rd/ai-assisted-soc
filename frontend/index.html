@@ -58,6 +58,10 @@
             <li class="nav-item" data-page="history">
                 <span class="nav-icon">&#128193;</span> Investigation History
             </li>
+            <li class="nav-section">Wave 1&ndash;3 &mdash; AI Governance</li>
+            <li class="nav-item" data-page="ai-governance">
+                <span class="nav-icon">&#129504;</span> AI Governance
+            </li>
             <li class="nav-section">System</li>
             <li class="nav-item" data-page="demo">
                 <span class="nav-icon">&#9654;</span> End-to-End Demo
@@ -851,6 +855,101 @@
                     <h4>&#10003; Orchestrator Synthesis</h4>
                     <div class="synthesis-content" id="orchSynthesisContent"></div>
                 </div>
+            </div>
+        </div>
+
+        <!-- AI Governance (Wave 1-3) -->
+        <div class="page" id="page-ai-governance">
+            <div class="page-header">
+                <h1>AI Governance &amp; Reasoning</h1>
+                <span class="badge badge-purple">Wave 1&ndash;3</span>
+            </div>
+            <p class="description">Visibility and control surface for the deterministic-grounding, auditability, and
+                safety subsystems that drive every agentic decision: local threat-intel grounding, the Investigation
+                Ledger, entity-risk scoring, the L0&ndash;L4 Automation Maturity Gate, Detection-as-Code rules, the
+                Playbook Engine, Compounding Memory, and the Self-Play Purple Team.</p>
+
+            <div class="panel">
+                <h3>Overview</h3>
+                <button class="btn btn-sm" onclick="getAIGovernanceOverview()">Refresh Overview</button>
+                <div id="aiGovOverviewResult" class="result-box"></div>
+            </div>
+
+            <div class="grid-2">
+                <div class="panel">
+                    <h3>Detection-as-Code Rules</h3>
+                    <p class="description">YAML-defined detection rules (including auto-filed Purple Team draft
+                        proposals) evaluated by the real <code>DetectionEngine</code>.</p>
+                    <button class="btn btn-sm" onclick="listDetectionRules()">List Rules</button>
+                    <div id="detectionRulesResult" class="result-box"></div>
+                </div>
+                <div class="panel">
+                    <h3>Entity-Risk Scoring</h3>
+                    <p class="description">Time-decayed cumulative risk per entity across alerts, with auto-promotion
+                        to a full investigation once the threshold is crossed.</p>
+                    <button class="btn btn-sm" onclick="listEntityRisk()">List Tracked Entities</button>
+                    <div id="entityRiskResult" class="result-box"></div>
+                </div>
+            </div>
+
+            <div class="grid-2">
+                <div class="panel">
+                    <h3>L0&ndash;L4 Automation Maturity Gate</h3>
+                    <p class="description">Current automation tier and the auto-execute/queue-for-approval verdict
+                        for every response skill, gated by blast radius.</p>
+                    <button class="btn btn-sm" onclick="getMaturityGateStatus()">Get Status</button>
+                    <div id="maturityGateResult" class="result-box"></div>
+                </div>
+                <div class="panel">
+                    <h3>Playbook Engine</h3>
+                    <p class="description">Declarative YAML incident-response playbooks (trigger &rarr; ordered
+                        steps &rarr; failure handling) that can take precedence over the static pipeline.</p>
+                    <button class="btn btn-sm" onclick="listPlaybooks()">List Playbooks</button>
+                    <div id="playbooksResult" class="result-box"></div>
+                </div>
+            </div>
+
+            <div class="grid-2">
+                <div class="panel">
+                    <h3>Compounding Memory</h3>
+                    <p class="description">Per-alert-signature false-positive priors distilled from resolved
+                        investigations; applies a bounded &plusmn;0.10 confidence nudge at Triage.</p>
+                    <div class="btn-group">
+                        <button class="btn btn-sm" onclick="listMemoryPriors()">List Priors</button>
+                        <button class="btn btn-sm" onclick="runMemoryDistillation()">Run Distillation</button>
+                    </div>
+                    <div id="memoryPriorsResult" class="result-box"></div>
+                </div>
+                <div class="panel">
+                    <h3>Self-Play Purple Team</h3>
+                    <p class="description">Replays a canned attack-technique chain through the real detection
+                        engine, scores rule coverage, and auto-files disabled draft rules for gaps.</p>
+                    <div class="form-group">
+                        <label>Campaign</label>
+                        <select id="purpleTeamCampaign">
+                            <option value="ransomware_chain">Ransomware Chain (T1566.001 &rarr; T1486)</option>
+                            <option value="credential_theft_chain">Credential Theft Chain (T1078 &rarr; T1048)</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-primary" onclick="runPurpleTeamCampaign()">Run Campaign</button>
+                    <div id="purpleTeamResult" class="result-box"></div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h3>Investigation Ledger &mdash; Replay &amp; Audit Trail</h3>
+                <p class="description">Every agentic LLM decision (supervisor ReAct steps, Triage/RCA/Response
+                    synthesis) recorded with its exact prompt, response, decision, and token/latency cost &mdash;
+                    fully replayable per investigation.</p>
+                <div class="form-group">
+                    <label>Investigation ID</label>
+                    <input type="text" id="ledgerInvId" placeholder="e.g. inv-abc123">
+                </div>
+                <div class="btn-group">
+                    <button class="btn btn-sm" onclick="viewInvestigationLedger()">View Ledger</button>
+                    <button class="btn btn-sm" onclick="viewInvestigationLedgerCost()">Cost Summary</button>
+                </div>
+                <div id="ledgerResult" class="result-box"></div>
             </div>
         </div>
 

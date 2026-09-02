@@ -1,7 +1,8 @@
 # AI-Assisted SOC Platform — Master Roadmap
 
-> **Last audited:** 2026-08-17  
+> **Last audited:** 2026-09-02
 > **Audit scope:** Deep code review of every file in `backend/services/`, `backend/api/`, `backend/database/`, `backend/prompts/`, `frontend/`, and all infrastructure files. Focused on **AI quality, agentic architecture, and workflow robustness**.
+> **See also:** [DETAILED_IMPLEMENTATION_PLAN.md](DETAILED_IMPLEMENTATION_PLAN.md) — the actively-executed successor plan covering Quick Wins + Wave 1 (Phases A-E) + Wave 2 (Phases F-H) + Wave 3 (Phases I-M), all **complete** as of this audit (380 backend tests passing, zero regressions). Wave 4 (Phases N-P, roughly this doc's Phases 9-11) is **paused** pending real vendor credentials/infrastructure decisions — see that document's "Next steps" section.
 
 ---
 
@@ -37,7 +38,7 @@
 | **API (RCA)** | `routes/rca.py` (480+ lines) | ✅ Full RCA API with incident lifecycle, response execution. Uses mock data internally. |
 | **API (Correlation)** | `routes/correlation.py` | ✅ Compression pipeline, investigation packages, full-chain investigation endpoint. |
 | **API (Discovery)** | `routes/discovery.py` | ✅ Network discovery endpoint with real probes. |
-| **Frontend UI** | `index.html` + `styles.css` + `app.js` | ✅ 10-page SPA: Dashboard, Alert Ingestion, Evidence, Compression, Investigation, RCA, Response, Pending Approvals, Incidents, Discovery, Orchestrator. Dark theme, SSE streaming. |
+| **Frontend UI** | `index.html` + `styles.css` + `app.js` | ✅ 13-page SPA: Dashboard, Alert Ingestion, Evidence, Compression, Investigation, RCA, Response, Pending Approvals, Incidents, Discovery, Orchestrator, Investigation History, **AI Governance** (new, Wave 1-3 visibility). Dark theme, SSE streaming. |
 | **Docker Infrastructure** | `docker-compose.yml` | ✅ Postgres, Neo4j, Redis, Temporal stack (server + admin-tools + UI + dedicated PG). |
 | **Tests** | `backend/tests/` (9 test files) | ⚠️ Tests exist for Phase 1-2 services. **No tests** for orchestrator, LLM agents, temporal workflows, or RAG. |
 
@@ -187,7 +188,7 @@ Tests exist for Phase 1-2 services but there are zero tests for the orchestrator
 
 #### Gap M: Frontend Is Unmaintainable
 
-The entire UI is 3 files totaling 116KB. No component framework, no build system, no TypeScript.
+The entire UI is 3 files (now larger after the new AI Governance page). No component framework, no build system, no TypeScript. **Note (2026-09-02):** a new "AI Governance" page was added to this same vanilla-JS SPA to surface the Wave 1-3 subsystems (Detection Rules, Entity Risk, Maturity Gate, Playbooks, Compounding Memory, Purple Team, Investigation Ledger) — this closes the *visibility* gap for those features but does **not** address the underlying maintainability gap (still no build system/framework/TypeScript); a full framework migration remains Wave 4 / Phase P, currently paused.
 
 #### Gap N: No Authentication / RBAC
 
@@ -255,20 +256,20 @@ All endpoints are open. `CORS: allow_origins=["*"]`. No login, no API keys, no r
 *Goal: Every LLM interaction must be traceable, measurable, and recoverable.*
 *Priority: 🟡 P1*
 
-- [ ] **LLM call instrumentation**
+- [x] **LLM call instrumentation** — *Done via the Investigation Ledger (`investigation_ledger.py`) + `model_router.py` tagging every decision's tier/source; ledger replayable via `GET /api/v3/orchestrator/investigations/{id}/ledger` and now viewable in the frontend's AI Governance page.*
   - Log every prompt, response, token count, and latency to a structured log
-  - Add a `llm_calls` Postgres table for tracking
-  - Dashboard widget showing LLM health metrics
-- [ ] **Prompt/response caching**
+  - Add a `llm_calls` Postgres table for tracking *(implemented as `investigation_ledger_entries`)*
+  - Dashboard widget showing LLM health metrics *(cost-summary endpoint + UI)*
+- [x] **Prompt/response caching** — *Done via `llm_cache.py` (`LLMResponseCache`, Redis-backed with in-memory TTL fallback), wired into `supervisor.py`'s ReAct loop.*
   - Cache LLM responses by prompt hash in Redis
   - TTL-based invalidation
   - Cache hit/miss metrics
-- [ ] **Structured output validation**
+- [x] **Structured output validation** — *Done via `llm_client.validate_triage_output()` + retry-up-to-2 wired into `TriageAgent.execute()`.*
   - After every `structured_llm.ainvoke()`, validate the Pydantic model thoroughly
   - Check that severity is one of the allowed values
   - Check that entity types are valid enum values
   - Reject and retry if validation fails (up to 2 retries)
-- [ ] **Rate limiting for LLM endpoints**
+- [x] **Rate limiting for LLM endpoints** — *Done via `rate_limiter.py` (`TokenBucketLimiter`), wired into `supervisor.py`'s ReAct loop.*
   - Add a token bucket rate limiter for the LM Studio endpoint
   - Queue requests during bursts instead of failing
 - [x] **Prompt evaluation harness (CI-grade)**
@@ -407,11 +408,11 @@ All endpoints are open. `CORS: allow_origins=["*"]`. No login, no API keys, no r
 | ✅ Done | Adaptive re-investigation loop (Gap B) | Critical | High |
 | ✅ Done | Inter-agent communication / shared context (Gap C) | Critical | High |
 | ✅ Done | Dynamic AI-driven planning (Gap D) | High | Medium |
-| 🟡 P1 | Confidence calibration & hallucination detection (Gap E) | High | Medium |
-| 🟡 P1 | Include few-shot examples in LLM calls (Gap F) | High | Low |
-| 🟡 P1 | LLM observability & call logging (Gap G) | High | Medium |
+| ✅ Done | Confidence calibration & hallucination detection (Gap E) | High | Medium |
+| ✅ Done | Include few-shot examples in LLM calls (Gap F) | High | Low |
+| ✅ Done | LLM observability & call logging (Gap G) | High | Medium |
 | ✅ Done | Unify orchestrator implementations (Gap H) | Medium | Medium |
-| 🟡 P1 | Approval timeout & escalation (Gap I) | Medium | Low |
+| ✅ Done | Approval timeout & escalation (Gap I) | Medium | Low |
 | ✅ Done | Rich approval cards with action details (Gap J) | High | Medium |
 | ✅ Done | Investigation history dashboard & search (Gap K) | High | Medium |
 | ✅ Done | Activate database persistence | High | Medium |
@@ -419,13 +420,17 @@ All endpoints are open. `CORS: allow_origins=["*"]`. No login, no API keys, no r
 | ✅ Done | Human-in-the-Loop approval gates | High | High |
 | ✅ Done | Prompt versioning system | Medium | Low |
 | ✅ Done | Multi-model routing | Medium | Low |
-| 🟢 P2 | Automated test coverage for AI components (Gap L) | Medium | Medium |
-| 🟢 P2 | Authentication & RBAC (Gap N) | High | High |
-| 🟢 P2 | SIEM/EDR webhook ingestion | High | Medium |
-| 🟢 P2 | Prometheus + Grafana observability | Medium | Medium |
-| 🔵 P3 | Kubernetes Helm charts | Medium | High |
-| 🔵 P3 | Frontend framework migration (Gap M) | Low | High |
-| 🔵 P3 | Multi-tenancy | Low | Very High |
+| ✅ Done | Automated test coverage for AI components (Gap L) | Medium | Medium |
+| 🟢 P2 (Wave 4, paused) | Authentication & RBAC (Gap N) | High | High |
+| 🟢 P2 (Wave 4, paused) | SIEM/EDR webhook ingestion | High | Medium |
+| 🟢 P2 (Wave 4, paused) | Prometheus + Grafana observability | Medium | Medium |
+| 🔵 P3 (Wave 4, paused) | Kubernetes Helm charts | Medium | High |
+| 🔵 P3 (Wave 4, paused) | Frontend framework migration (Gap M) | Low | High |
+| 🔵 P3 (Wave 4, paused) | Multi-tenancy | Low | Very High |
+| ✅ Done | Local threat-intel grounding, Investigation Ledger, Model Router, Agentic security hardening (Wave 1 A-E) | Critical | High |
+| ✅ Done | Maturity Gate rollout, Entity-Risk rollout, Detection-as-Code + Live Actions (Wave 2 F-H) | High | High |
+| ✅ Done | Hypothesis Swarm, Compounding Memory, Playbook Engine, Purple Team, Security Knowledge Graph (Wave 3 I-M) | High | Very High |
+| ✅ Done | AI Governance UI page surfacing all Wave 1-3 subsystems | Medium | Medium |
 
 ---
 
@@ -447,3 +452,17 @@ All endpoints are open. `CORS: allow_origins=["*"]`. No login, no API keys, no r
 | Inter-Agent Communication (Gap C) | 2026-08-18 | Added LLM message bus schema and removed hardcoded python communication simulations |
 | Investigation History & Explorer (Gap K) | 2026-08-19 | Search toolbar, KPI stats, 4-tab drill-down panel, CoT reasoning logs, and Canvas attack graph |
 | Agentic Pluggable Skills Framework | 2026-08-23 | Universal SKILL.md engine, 23 skills across Triage/Evidence/Compression/Discovery, 102 unit/integration tests |
+| Quick Wins: Maturity Gate, Entity-Risk, Prompt Registry | 2026-09-02 | `maturity_gate.py`, `entity_risk.py`, `prompts.lock.json` + few-shot injection fix |
+| Wave 1 Phase A: Local Threat-Intel Grounding | 2026-09-02 | `local_feeds.py` (SQLite-indexed CSV feeds from `mthcht/awesome-lists`), wired into Triage/Evidence/Compression skills |
+| Wave 1 Phase B: Malware-Analysis Evidence Skill | 2026-09-02 | `yara_scanner.py` + feature-flagged `virustotal_client.py`, wired into file-forensics evidence collection |
+| Wave 1 Phase C: Investigation Ledger | 2026-09-02 | `investigation_ledger.py` — every agentic LLM call recorded (prompt/response/decision/cost), replayable via API + UI |
+| Wave 1 Phase D: Multi-Model Router + LLM Observability | 2026-09-02 | `model_router.py`, `llm_cache.py`, `rate_limiter.py`, structured-output validation with retry |
+| Wave 1 Phase E: Agentic AI Security Hardening | 2026-09-02 | `agentic_security.py` — untrusted-data delimiting, goal-drift detection, skill authorization gate, kill switch |
+| Wave 2 Phase F/G: Maturity Gate + Entity-Risk full rollout | 2026-09-02 | All 7 response skills mapped to blast radius; entity-risk tracked from Triage + Evidence with auto-promotion |
+| Wave 2 Phase H: Detection-as-Code + Live Actions | 2026-09-02 | `detection_engine.py` (YAML rules + fixtures), `live_actions.py` registry gated by the Maturity Gate |
+| Wave 3 Phase I: Investigation Swarm | 2026-09-02 | `hypothesis_swarm.py` — parallel competing-hypothesis generation for complex/stuck investigations |
+| Wave 3 Phase J: Compounding Memory | 2026-09-02 | `memory/distillation.py` — per-alert-signature false-positive priors, bounded ±0.10 Triage confidence adjustment |
+| Wave 3 Phase K: Playbook Engine | 2026-09-02 | `playbook_engine.py` — declarative YAML playbooks driving real Triage/Evidence/Compression/RCA/Response agents |
+| Wave 3 Phase L: Self-Play Purple Team | 2026-09-02 | `self_play/purple_team.py` — canned attack campaigns replayed against `DetectionEngine`, auto-drafts coverage-gap rules |
+| Wave 3 Phase M: Security Knowledge Graph at Ingest | 2026-09-02 | Neo4j `get_blast_radius()`/`get_neighbors()`, ingest-time user→host→process graph writes |
+| AI Governance UI + read-only API | 2026-09-02 | New `frontend` page + `backend/api/routes/ai_governance.py` surfacing Detection Rules, Entity Risk, Maturity Gate, Playbooks, Compounding Memory, Purple Team, and the Investigation Ledger |

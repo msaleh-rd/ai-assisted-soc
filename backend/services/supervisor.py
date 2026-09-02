@@ -7,11 +7,15 @@ action from the capability catalog.
 
 import json
 import logging
+import time
 from typing import Dict, Any, List, Optional
 
 from backend.services.investigation_context import InvestigationContext
-from backend.services.llm_client import get_llm, SupervisorDecision
+from backend.services.llm_client import get_llm, SupervisorDecision, MODEL_ROUTING, DEFAULT_MODEL
 from backend.services.prompt_manager import prompt_manager
+from backend.services.investigation_ledger import record_ledger_entry
+from backend.services.agentic_security import wrap_untrusted, detect_goal_drift
+from backend.services.hypothesis_swarm import investigation_swarm
 
 logger = logging.getLogger("supervisor")
 
@@ -34,11 +38,15 @@ class SupervisorAgent:
         """
         # 1. Prepare structured summary strings for the supervisor prompt
         alert = context.alert_data or {}
-        alert_summary = (
+        # Untrusted-data labeling (Phase E, Step 1 / ASI01, ASI02): every field below is
+        # attacker-influenced (originates from raw alert/log content), so it is wrapped
+        # in a delimited block instructing the LLM to treat it strictly as data.
+        alert_summary = wrap_untrusted(
             f"Alert ID: {alert.get('alert_id', 'unknown')} | "
             f"Host: {alert.get('computer_name', 'unknown')} | "
             f"User: {alert.get('user_name', 'unknown')} | "
-            f"Description: {alert.get('description', 'No description provided')}"
+            f"Description: {alert.get('description', 'No description provided')}",
+            label="alert_data",
         )
 
         entities_list = [
@@ -83,6 +91,51 @@ class SupervisorAgent:
             )
         history_json = "\n".join(history_items) if history_items else "No previous supervisor actions."
 
+        # Investigation Swarm (Wave 3, Phase I): the loop above tests one hypothesis
+        # at a time, which is why complex cases can loop (Evidence -> Evidence ->
+        # Evidence trying to find the same answer a different way). For genuinely
+        # complex cases that are already stuck -- repeated evidence gathering with
+        # no RCA findings yet -- delegate to parallel competing-hypothesis
+        # generation instead. Simple/common cases never reach this branch (bypassed
+        # entirely by should_swarm), and any swarm failure falls straight through to
+        # the normal single-hypothesis decision path below -- zero regression risk.
+        if (
+            investigation_swarm.should_swarm(context)
+            and context.action_counts.get("gather_evidence", 0) >= 2
+            and not context.rca_findings
+        ):
+            try:
+                swarm_result = await investigation_swarm.run_swarm(context)
+                winner = swarm_result.winning_hypothesis
+                context.swarm_debate_notes = swarm_result.debate_notes
+                swarm_decision = SupervisorDecision(
+                    supervisor_assessment=(
+                        f"Investigation Swarm considered {len(swarm_result.hypotheses)} competing "
+                        f"hypotheses and converged on: {winner.hypothesis}"
+                    ),
+                    thought=swarm_result.debate_notes,
+                    action="perform_rca",
+                    target_entities=[e.get("id") for e in context.entities if isinstance(e, dict) and e.get("id")],
+                    target_skills=[],
+                    specific_goal=(
+                        f"Formalize root cause analysis around the swarm-selected leading hypothesis: "
+                        f"{winner.hypothesis}"
+                    ),
+                )
+                swarm_decision = self._validate_and_sanitize_decision(swarm_decision, context)
+                investigation_id = getattr(context, "investigation_id", None) or (context.alert_data or {}).get("alert_id", "unknown")
+                record_ledger_entry(
+                    investigation_id=investigation_id,
+                    agent_name="investigation_swarm",
+                    phase="swarm",
+                    llm_response=swarm_result.debate_notes,
+                    decision=swarm_decision.model_dump(),
+                )
+                logger.info(f"Investigation Swarm engaged:\n{swarm_result.debate_notes}")
+                return swarm_decision
+            except Exception as e:
+                logger.warning(f"Investigation Swarm failed, falling back to single-hypothesis loop: {e}")
+
         # 2. Invoke Supervisor LLM with structured output
         try:
             llm = get_llm(role="supervisor")
@@ -107,7 +160,29 @@ class SupervisorAgent:
             )
 
             prompt = f"{system_prompt}\n\n{user_prompt}"
-            decision: SupervisorDecision = await structured_llm.ainvoke(prompt)
+
+            # LLM Observability (Phase D, Step 3): rate-limit + cache the call.
+            from backend.services.llm_cache import llm_response_cache
+            from backend.services.rate_limiter import llm_rate_limiter
+            import hashlib as _hashlib
+
+            prompt_hash = _hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            cache_key = f"supervisor:{prompt_hash}"
+            cached = llm_response_cache.get(cache_key)
+
+            _t0 = time.time()
+            if cached is not None:
+                decision: SupervisorDecision = SupervisorDecision(**cached)
+                latency_ms = 0
+                logger.debug(f"Supervisor LLM cache hit for prompt_hash={prompt_hash[:12]}")
+            else:
+                await llm_rate_limiter.acquire()
+                decision: SupervisorDecision = await structured_llm.ainvoke(prompt)
+                latency_ms = int((time.time() - _t0) * 1000)
+                try:
+                    llm_response_cache.set(cache_key, decision.model_dump())
+                except Exception:
+                    pass
 
             # Auto-register newly detected pivot entity if provided
             if decision.pivot_entity_detected:
@@ -121,6 +196,32 @@ class SupervisorAgent:
             # Validate decision
             decision = self._validate_and_sanitize_decision(decision, context)
             logger.info(f"Supervisor Decision (Iteration {context.iteration + 1}): {decision.action} on {decision.target_entities} | Goal: {decision.specific_goal}")
+
+            # Goal-drift detection (Phase E, Step 2 / ASI01): flag (never silently block)
+            # when the proposed action diverges sharply from the investigation's
+            # evidentiary state, for analyst review via the Investigation Ledger.
+            goal_drift_flag = detect_goal_drift(context, decision)
+            if goal_drift_flag:
+                logger.warning(f"Goal drift detected: {goal_drift_flag}")
+                context.post_message(
+                    msg_type="FYI",
+                    source="agentic_security",
+                    target="*",
+                    payload={"goal_drift_flag": goal_drift_flag},
+                )
+
+            investigation_id = getattr(context, "investigation_id", None) or (context.alert_data or {}).get("alert_id", "unknown")
+            record_ledger_entry(
+                investigation_id=investigation_id,
+                agent_name=self.name,
+                phase="supervisor",
+                prompt_sent=prompt,
+                llm_response=json.dumps(decision.model_dump()),
+                model_used=MODEL_ROUTING.get("supervisor", DEFAULT_MODEL),
+                decision={**decision.model_dump(), "goal_drift_flag": goal_drift_flag} if goal_drift_flag else decision.model_dump(),
+                skills_invoked=decision.target_skills,
+                latency_ms=latency_ms,
+            )
             return decision
 
         except Exception as e:
