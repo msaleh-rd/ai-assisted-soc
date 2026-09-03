@@ -5,18 +5,44 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from datetime import datetime
+import asyncio
+import logging
 import os
 
 from contextlib import asynccontextmanager
 from backend.api import router as api_router
 from backend.database.connection import init_db, close_db
 
+logger = logging.getLogger("main")
+
+THREAT_INTEL_REFRESH_INTERVAL_HOURS = float(os.getenv("THREAT_INTEL_REFRESH_INTERVAL_HOURS", "24"))
+
+
+async def _threat_intel_refresh_loop() -> None:
+    """Periodically re-fetch upstream threat-intel CSVs and reload the local index.
+
+    Runs one refresh immediately at startup, then repeats on
+    THREAT_INTEL_REFRESH_INTERVAL_HOURS. Best-effort/log-only on failure -- never
+    crashes the app or blocks startup (runs as a background asyncio task).
+    """
+    from backend.scripts.refresh_threat_intel import refresh
+
+    while True:
+        try:
+            await asyncio.to_thread(refresh)
+        except Exception as e:
+            logger.warning(f"Scheduled threat-intel refresh failed: {e}")
+        await asyncio.sleep(THREAT_INTEL_REFRESH_INTERVAL_HOURS * 3600)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     init_db()
+    refresh_task = asyncio.create_task(_threat_intel_refresh_loop())
     yield
     # Shutdown
+    refresh_task.cancel()
     await close_db()
 
 # Create FastAPI app

@@ -151,7 +151,7 @@ class LocalThreatIntelDB:
         is_glob_category = category not in self._exact_categories
         glob_rows: List[tuple] = []
 
-        with open(file_path, "r", encoding="utf-8", newline="") as f:
+        with open(file_path, "r", encoding="utf-8-sig", newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 raw_key = (row.get(key_column) or "").strip()

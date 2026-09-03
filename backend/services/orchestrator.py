@@ -355,12 +355,17 @@ class TriageAgent(BaseAgent):
         # when no single alert crosses a severity threshold on its own.
         try:
             from backend.services.entity_risk import entity_risk_tracker, severity_to_risk_score
+            from backend.models.entities import normalize_entity_type
             risk_score = severity_to_risk_score(findings.get("severity", "unknown"))
             alert_id = alert.get("alert_id", "unknown")
             newly_promoted_entities = []
             for ent in findings.get("entities_identified", []):
                 eid = ent.get("id") if isinstance(ent, dict) else None
-                etype = ent.get("type", "unknown") if isinstance(ent, dict) else "unknown"
+                # Normalize the entity type the same way the Evidence phase builds its
+                # entity_graph keys (normalize_entity_type), so the same physical entity
+                # (e.g. "hostname" from triage vs "host" from evidence) accumulates risk
+                # under one tracker key instead of fragmenting across two.
+                etype = normalize_entity_type(ent.get("type", "unknown") if isinstance(ent, dict) else "unknown")
                 if not eid:
                     continue
                 update = entity_risk_tracker.record_alert(
@@ -1577,25 +1582,30 @@ class OrchestratorAgent:
 
         return build_static_plan_subtasks()
 
-    async def execute_stream(self, task: str, alert_data: Dict[str, Any], use_ai_planner: bool = False) -> AsyncGenerator[str, None]:
+    async def execute_stream(self, task: str, alert_data: Dict[str, Any], use_ai_planner: bool = False, investigation_id: Optional[str] = None) -> AsyncGenerator[str, None]:
         """Execute the investigation and yield SSE events for each step.
         
         Dual-mode support:
         - use_ai_planner=False: Fast, deterministic 5-phase execution.
         - use_ai_planner=True: Autonomous ReAct Supervisor dynamically driving phases.
+
+        `investigation_id`, when provided by the caller (e.g. the API route), becomes the
+        canonical run_id used for every SSE event AND the InvestigationContext -- keeping the
+        ledger/audit trail and the investigation record keyed under the same identifier the
+        caller already has. Falls back to a freshly generated id if omitted (e.g. direct/test use).
         """
         if use_ai_planner:
-            async for evt in self._execute_stream_react_supervisor(task, alert_data):
+            async for evt in self._execute_stream_react_supervisor(task, alert_data, investigation_id):
                 yield evt
         else:
-            async for evt in self._execute_stream_static(task, alert_data):
+            async for evt in self._execute_stream_static(task, alert_data, investigation_id):
                 yield evt
 
-    async def _execute_stream_static(self, task: str, alert_data: Dict[str, Any]) -> AsyncGenerator[str, None]:
+    async def _execute_stream_static(self, task: str, alert_data: Dict[str, Any], investigation_id: Optional[str] = None) -> AsyncGenerator[str, None]:
         """Fast, deterministic 5-phase execution for standard triage."""
-        run_id = f"run-{uuid.uuid4().hex[:8]}"
+        run_id = investigation_id or f"run-{uuid.uuid4().hex[:8]}"
         run_start = time.time()
-        context = InvestigationContext(alert_data=alert_data, use_ai_planner=False)
+        context = InvestigationContext(alert_data=alert_data, use_ai_planner=False, investigation_id=run_id)
 
         # Playbook Engine (Wave 3, Phase K): if a declarative playbook's trigger
         # matches this alert (severity + tags), it takes precedence over the
@@ -1808,11 +1818,11 @@ class OrchestratorAgent:
             "timestamp": datetime.now().isoformat(),
         })
 
-    async def _execute_stream_react_supervisor(self, task: str, alert_data: Dict[str, Any]) -> AsyncGenerator[str, None]:
+    async def _execute_stream_react_supervisor(self, task: str, alert_data: Dict[str, Any], investigation_id: Optional[str] = None) -> AsyncGenerator[str, None]:
         """Autonomous ReAct Investigation Supervisor dynamically selecting phases and actions."""
-        run_id = f"run-{uuid.uuid4().hex[:8]}"
+        run_id = investigation_id or f"run-{uuid.uuid4().hex[:8]}"
         run_start = time.time()
-        context = InvestigationContext(alert_data=alert_data, use_ai_planner=True)
+        context = InvestigationContext(alert_data=alert_data, use_ai_planner=True, investigation_id=run_id)
 
         yield sse_event("run_start", {
             "run_id": run_id,

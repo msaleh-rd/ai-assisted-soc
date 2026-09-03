@@ -391,11 +391,16 @@ class InvestigationWorkflow:
 
     @workflow.run
     async def run(self, input: InvestigationInput) -> Dict[str, Any]:
-        run_id = f"run-{workflow.info().workflow_id[:8]}"
+        # Use the full Temporal workflow_id (not a truncated derivative) as the canonical
+        # investigation_id: this is the exact same id temporal_client.py's start_investigation()
+        # returns to API callers and list_investigations() reports, so InvestigationRecord/ledger
+        # lookups by that id resolve correctly instead of hitting a different, truncated "run-"
+        # prefixed string that only ever existed inside this workflow.
+        run_id = workflow.info().workflow_id
         run_start = workflow.now()
 
         from backend.services.investigation_context import InvestigationContext
-        context = InvestigationContext(alert_data=input.alert_data, use_ai_planner=input.use_ai_planner)
+        context = InvestigationContext(alert_data=input.alert_data, use_ai_planner=input.use_ai_planner, investigation_id=run_id)
         context_dict = context.to_dict()
 
         self._progress.run_id = run_id

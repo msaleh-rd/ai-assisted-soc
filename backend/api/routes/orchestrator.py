@@ -27,6 +27,43 @@ USE_TEMPORAL = os.getenv("USE_TEMPORAL", "false").lower() in ("true", "1", "yes"
 IN_MEMORY_INVESTIGATIONS: List[Dict[str, Any]] = []
 
 
+def _persist_in_memory_investigation_record(investigation_id: str, investigation_record: Dict[str, Any]) -> None:
+    """Best-effort persist a completed in-memory-mode investigation to Postgres.
+
+    Mirrors the fields written by `persist_investigation_results_activity` in
+    temporal_workflows.py so that `/investigations` listing and `/investigations/{id}/ledger`
+    behave consistently regardless of USE_TEMPORAL. No-op if the database isn't configured;
+    never raises (matches the DB-optional pattern used throughout this codebase).
+    """
+    try:
+        from backend.database.connection import SessionLocal, get_db
+        from backend.database.postgres import InvestigationRecord
+        import contextlib
+
+        if not SessionLocal:
+            return
+
+        synthesis = investigation_record.get("synthesis") or {}
+        started_at = investigation_record.get("started_at")
+        completed_at = investigation_record.get("completed_at")
+
+        with contextlib.closing(next(get_db())) as db:
+            inv_record = InvestigationRecord(
+                investigation_id=investigation_id,
+                status=investigation_record.get("status", "completed"),
+                severity=synthesis.get("severity"),
+                risk_score=synthesis.get("severity_score") or synthesis.get("confidence_score") or 0.0,
+                entity_count=len(synthesis.get("key_findings", [])),
+                started_at=datetime.fromisoformat(started_at) if started_at else None,
+                completed_at=datetime.fromisoformat(completed_at) if completed_at else None,
+            )
+            db.merge(inv_record)
+            db.commit()
+    except Exception as persist_err:
+        logger.debug(f"In-memory investigation record persistence skipped: {persist_err}")
+
+
+
 # -----------------------------------------------------------------------
 # Request / Response schemas
 # -----------------------------------------------------------------------
@@ -90,7 +127,7 @@ async def investigate(request: OrchestrationRequest):
             }
             
             async for event in orchestrator.execute_stream(
-                request.task, request.alert_data, use_ai_planner=request.use_ai_planner
+                request.task, request.alert_data, use_ai_planner=request.use_ai_planner, investigation_id=inv_id
             ):
                 # Peek inside the SSE string to record completed agents and final synthesis
                 try:
@@ -109,6 +146,7 @@ async def investigate(request: OrchestrationRequest):
                             investigation_record["total_duration_ms"] = data_payload.get("total_duration_ms", 0)
                             investigation_record["completed_at"] = datetime.utcnow().isoformat()
                             IN_MEMORY_INVESTIGATIONS.insert(0, investigation_record)
+                            _persist_in_memory_investigation_record(inv_id, investigation_record)
                 except Exception:
                     pass
                     
@@ -701,6 +739,57 @@ async def get_investigation_ledger_cost(investigation_id: str):
     from backend.services.investigation_ledger import investigation_ledger
 
     return investigation_ledger.get_cost_summary(investigation_id)
+
+
+class VerdictRequest(BaseModel):
+    """Analyst-submitted final verdict for a resolved investigation."""
+    verdict: str  # 'false_positive' | 'confirmed_incident' | 'benign'
+    risk_score: Optional[float] = None
+
+
+@router.post("/investigations/{investigation_id}/verdict")
+async def submit_investigation_verdict(investigation_id: str, request: VerdictRequest):
+    """
+    Record an analyst's final verdict for a resolved investigation, feeding the
+    Compounding Memory (Wave 3, Phase J) learning loop: `CompoundingMemory.record_verdict()`
+    writes the verdict + alert signature onto `InvestigationRecord`, so a later
+    `distill()` pass can compute per-signature false-positive priors from it.
+
+    The alert signature is resolved from the investigation's own Triage ledger entry
+    (recorded during the investigation itself), so callers only need to supply the verdict.
+    """
+    from backend.services.investigation_ledger import investigation_ledger
+    from backend.services.memory.distillation import compounding_memory
+
+    if request.verdict not in ("false_positive", "confirmed_incident", "benign"):
+        raise HTTPException(status_code=400, detail="verdict must be one of: false_positive, confirmed_incident, benign")
+
+    entries = investigation_ledger.replay(investigation_id)
+    alert_signature = None
+    for entry in entries:
+        if entry.phase == "triage" and entry.decision.get("alert_signature"):
+            alert_signature = entry.decision["alert_signature"]
+            break
+
+    if not alert_signature:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No triage ledger entry with an alert_signature found for investigation '{investigation_id}'.",
+        )
+
+    compounding_memory.record_verdict(
+        investigation_id=investigation_id,
+        alert_signature=alert_signature,
+        verdict=request.verdict,
+        risk_score=request.risk_score or 0.0,
+    )
+
+    return {
+        "investigation_id": investigation_id,
+        "alert_signature": alert_signature,
+        "verdict": request.verdict,
+        "status": "recorded",
+    }
 
 
 @router.get("/approvals/pending")

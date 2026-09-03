@@ -67,7 +67,11 @@ def test_lookup_port_matches_known_suspicious_port(db):
 
 
 def test_lookup_port_no_match_for_unlisted_port(db):
-    assert db.lookup_port(9999) is None
+    # 999999 is not a valid TCP/UDP port (valid range is 0-65535), so it can never
+    # legitimately appear in any real "suspicious ports" feed -- unlike a plausible-looking
+    # port number (e.g. 9999), which upstream feed updates could add over time now that
+    # Phase D live-fetches the real, larger upstream list instead of a small static subset.
+    assert db.lookup_port(999999) is None
 
 
 def test_lookup_mutex_matches_known_malware_mutex(db):

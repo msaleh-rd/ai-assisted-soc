@@ -128,9 +128,12 @@ async def test_dual_mode_orchestrator_static_stream():
         events.append(raw_evt)
 
     assert len(events) > 0
-    # Should start with deterministic_static mode
+    # Should use one of the two non-AI-planner modes: the plain deterministic
+    # static plan, or the declarative Playbook Engine (Wave 3) when the alert
+    # matches a playbook trigger (e.g. this ransomware alert matches
+    # ransomware-response-v1) -- either is a valid use_ai_planner=False outcome.
     combined = "".join(events)
-    assert "deterministic_static" in combined
+    assert ("deterministic_static" in combined) or ('"mode": "playbook"' in combined)
     assert "run_complete" in combined
     assert "completed" in combined
 

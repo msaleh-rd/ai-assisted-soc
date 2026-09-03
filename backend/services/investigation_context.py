@@ -30,6 +30,7 @@ class InvestigationContext:
     """
     alert_data: Dict[str, Any] = field(default_factory=dict)
     use_ai_planner: bool = False
+    investigation_id: str = ""
     
     # Phase 1: Triage outputs
     entities: List[Dict[str, Any]] = field(default_factory=list)
